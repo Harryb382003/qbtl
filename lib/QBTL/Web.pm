@@ -5,6 +5,8 @@ use FindBin qw($Bin);
 use Mojolicious;
 use Mojo::JSON qw(true);
 use QBTL::Scan;
+use QBTL::Parse;
+
 
 sub app {
   my $app = Mojolicious->new;
@@ -36,6 +38,16 @@ sub app {
       $out->{error} = "$@";
     };
     $c->render(json => $out);
+  });
+
+  $r->get('/parse_smoke' => sub {
+    my $c = shift;
+  # Minimal opts + empty torrent list for smoke test
+    my $res = eval { QBTL::Parse::run(all_torrents => [], opts => {}) };
+    if ($@) {
+      return $c->render(json => { error => "$@" });
+    }
+    $c->render(json => { ok => Mojo::JSON->true });
   });
 
   $r->get('/scan' => sub {
