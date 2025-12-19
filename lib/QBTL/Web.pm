@@ -4,9 +4,9 @@ use common::sense;
 use FindBin qw($Bin);
 use Mojolicious;
 use Mojo::JSON qw(true);
-use QBTL::Scan;
 use QBTL::Parse;
-
+use QBTL::QBT;
+use QBTL::Scan;
 
 sub app {
   my $app = Mojolicious->new;
@@ -48,6 +48,21 @@ sub app {
       return $c->render(json => { error => "$@" });
     }
     $c->render(json => { ok => Mojo::JSON->true });
+  });
+
+  $r->get('/qbt_state_preview' => sub {
+    my $c = shift;
+    my $opts = {};   # later: load config/options properly
+    my $set = eval { QBTL::QBT::infohash_set(opts => $opts) };
+    if ($@) {
+      return $c->render(json => { error => "$@" });
+    }
+  # We don’t assume structure; just give a safe count.
+    my $count =
+      ref($set) eq 'HASH'  ? scalar(keys %$set) :
+      ref($set) eq 'ARRAY' ? scalar(@$set) :
+      0;
+    $c->render(json => { qbt_loaded_count => $count });
   });
 
   $r->get('/scan' => sub {
