@@ -5,6 +5,7 @@ use FindBin qw($Bin);
 use Mojolicious;
 use Mojo::JSON qw(true);
 use QBTL::Parse;
+use QBTL::Plan;
 use QBTL::QBT;
 use QBTL::Scan;
 
@@ -48,6 +49,47 @@ sub app {
       return $c->render(json => { error => "$@" });
     }
     $c->render(json => { ok => Mojo::JSON->true });
+  });
+
+  $r->get('/plan_preview' => sub {
+    my $c = shift;
+    my $opts = { torrent_dir => "/" };  # temporary; we’ll make this configurable next
+    my $scan = eval { QBTL::Scan::run(opts => $opts) };
+    if ($@) {
+      return $c->render(json => { error => "scan: $@" });
+    }
+    my $qbt_set = eval { QBTL::QBT::infohash_set(opts => $opts) };
+    if ($@) {
+      return $c->render(json => { error => "qbt: $@" });
+    }
+  # Build local ih => path map using legacy TorrentParser extract_metadata
+    my $parsed = eval {
+      QBTL::Parse::run(all_torrents => $scan->{torrents}, opts => $opts, qbt_loaded_tor => $qbt_set)
+    };
+    if ($@) {
+      return $c->render(json => { error => "parse: $@" });
+    }
+  # We need a stable local-by-infohash structure.
+  # Your legacy parser likely has something like $parsed->{by_infohash} or similar.
+  # For now: infer it safely if present.
+    my $local_by_ih = $parsed->{by_infohash} || $parsed->{infohash_map} || {};
+    if (ref($local_by_ih) ne 'HASH' || !keys %$local_by_ih) {
+      return $c->render(json => {
+        error => "No local infohash map found in parsed data (expected by_infohash/infohash_map).",
+        keys_seen => [ sort grep { defined } keys %$parsed ],
+      });
+    }
+    my $plan = QBTL::Plan::missing_infohashes(
+      local_by_ih => $local_by_ih,
+      qbt_set     => (ref($qbt_set) eq 'HASH' ? $qbt_set : {}),
+    );
+    $c->render(json => {
+      local_unique_infohashes => $plan->{local_count},
+      qbt_loaded_count        => $plan->{qbt_count},
+      overlap_count           => $plan->{overlap},
+      missing_count           => scalar(@{ $plan->{missing} }),
+      sample_overlap          => undef,
+    });
   });
 
   $r->get('/qbt_state_preview' => sub {
