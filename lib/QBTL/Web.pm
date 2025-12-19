@@ -25,6 +25,19 @@ sub app {
     $c->render(json => { ok => true, app => 'qbtl' });
   });
 
+  $r->get('/legacy_smoke' => sub {
+    my $c = shift;
+    my $out = {};
+    eval {
+      require Utils;
+      $out->{os} = Utils::test_OS();
+      1;
+    } or do {
+      $out->{error} = "$@";
+    };
+    $c->render(json => $out);
+  });
+
   $r->get('/scan' => sub {
 		my $c = shift;
 		my $res = QBTL::Scan::run();
