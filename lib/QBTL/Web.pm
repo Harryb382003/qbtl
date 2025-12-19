@@ -56,6 +56,31 @@ sub app {
 		$c->render(json => $res);
 	});
 
+	$r->get('/scan_parse_preview' => sub {
+    my $c = shift;
+  # Minimal opts for now (we'll load real config later)
+    my $opts = { torrent_dir => "/" };
+    my $scan = eval { QBTL::Scan::run(opts => $opts) };
+    if ($@) {
+      return $c->render(json => { error => "scan: $@" });
+    }
+    my $parsed = eval {
+      QBTL::Parse::run(all_torrents => $scan->{torrents}, opts => $opts);
+    };
+    if ($@) {
+      return $c->render(json => { error => "parse: $@" });
+    }
+  # Preview: only return counts (avoid huge JSON)
+    my $pending = $parsed->{pending_add} || [];
+    $c->render(json => {
+      found_torrents   => $scan->{found},
+      pending_add      => scalar(@$pending),
+      collisions_count => (
+        $parsed->{collisions} ?
+        scalar(keys %{ $parsed->{collisions} }) :
+        0),
+    });
+  });
   return $app;
 }
 
