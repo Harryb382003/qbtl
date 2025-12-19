@@ -1,0 +1,174 @@
+# -------------------------------------------------
+# Keep .gitignore safe
+# -------------------------------------------------
+!.gitignore
+
+# -------------------------------------------------
+# OS-generated files
+# -------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# -------------------------------------------------
+# Logs and caches
+# -------------------------------------------------
+*.log
+logs/
+cache/
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.swo
+*.swm
+*.swn
+*.err
+*.pid
+*.seed
+*.lock
+
+# -------------------------------------------------
+# Profiling and debugging
+# -------------------------------------------------
+nytprof.out
+nytprof/
+*.prof
+*.profile
+*.gcov
+*.gcda
+*.gcno
+*.coverage
+coverage/
+
+# -------------------------------------------------
+# Build artifacts
+# -------------------------------------------------
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+*.a
+*.lib
+*.lo
+*.la
+*.class
+*.jar
+*.war
+*.ear
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+blib/
+Build/
+build/
+dist/
+target/
+node_modules/
+bower_components/
+
+# -------------------------------------------------
+# Perl-specific
+# -------------------------------------------------
+# Local::lib directories
+local/
+perl5/
+.perl/
+# Module build artifacts
+Build
+MYMETA.*
+Makefile
+Makefile.old
+pm_to_blib
+*.bs
+*.bso
+*.pmc
+# CPAN installer dirs
+_cpan/
+cpan/
+.cpan/
+.cpanm/
+# Test output
+*.t.log
+*.tap
+# Temporary Perl debug files
+perl-debug.txt
+perl-stacktrace.txt
+
+# -------------------------------------------------
+# Archives
+# -------------------------------------------------
+*.zip
+*.tar
+*.gz
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+.zips/
+
+# -------------------------------------------------
+# Editor / IDE directories
+# -------------------------------------------------
+.idea/
+.vscode/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+*.iml
+.project
+.settings/
+.metadata/
+nbproject/
+*~
+
+# -------------------------------------------------
+# Version control metadata
+# -------------------------------------------------
+.git/
+.gitattributes
+.gitmodules
+.hg/
+.svn/
+
+# -------------------------------------------------
+# qBittorrent / Torrent fixer-specific
+# -------------------------------------------------
+duplicates/
+results/
+export_dir/
+export_dir_fin/
+*.torrent
+*.magnet
+*.json
+# -------------------------------------------------
+# macOS-specific extended attributes
+# -------------------------------------------------
+.AppleDouble
+.LSOverride
+Icon?
+
+# -------------------------------------------------
+# Always track Perl source & test files
+# -------------------------------------------------
+!*.pl
+!*.pm
+!*.t
+torrent_fixer.pl.kate-swp
+.sandbox/
+.sandbox/
+torrent_fixer_diff.txt
+lib/TorrentParser.pm.derp
+temp_ignore/
+l_parsed_snapshot.pl
