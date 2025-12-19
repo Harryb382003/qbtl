@@ -4,6 +4,7 @@ use common::sense;
 use FindBin qw($Bin);
 use Mojolicious;
 use Mojo::JSON qw(true);
+use QBTL::Scan;
 
 sub app {
   my $app = Mojolicious->new;
@@ -23,6 +24,12 @@ sub app {
     my $c = shift;
     $c->render(json => { ok => true, app => 'qbtl' });
   });
+
+  $r->get('/scan' => sub {
+		my $c = shift;
+		my $res = QBTL::Scan::run();
+		$c->render(json => $res);
+	});
 
   return $app;
 }
