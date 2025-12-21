@@ -1,0 +1,33 @@
+% layout 'main';
+% title 'QBTL - Repairable broken torrents';
+
+<h1>Repairable broken torrents (name == infohash)</h1>
+
+<p>Total broken: <%= $found %></p>
+<p>Repairable (local .torrent found): <%= $repairable %></p>
+
+<div style="overflow-x:auto; max-width:100%;">
+<table border="1" cellspacing="0" cellpadding="6" style="white-space:nowrap;">
+  <tr>
+    <th>hash</th>
+    <th>state</th>
+    <th>progress</th>
+    <th>save_path</th>
+    <th>local?</th>
+    <th>local source_path</th>
+    <th>bucket</th>
+  </tr>
+
+  % for my $t (@$sample) {
+    <tr>
+      <td><code><%= $t->{hash} %></code></td>
+      <td><%= $t->{state} %></td>
+      <td><%= $t->{progress} %></td>
+      <td><%= $t->{save_path} %></td>
+      <td><%= $t->{have_local} ? 'YES' : 'NO' %></td>
+      <td style="white-space:normal;"><%= $t->{source_path} %></td>
+      <td><%= $t->{bucket} %></td>
+    </tr>
+  % }
+</table>
+</div>

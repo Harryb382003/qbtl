@@ -14,5 +14,8 @@ use QBTL::Web;
 my %opts;
 GetOptions( 'dev-mode' => \$opts{dev_mode} ) or die "Bad options\n";
 
+my $root = "$Bin/..";
+$opts{root_dir} = $root;
+
 my $app = QBTL::Web::app(\%opts);
 $app->start('daemon', '-l', 'http://127.0.0.1:8080');

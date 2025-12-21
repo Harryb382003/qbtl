@@ -1,0 +1,27 @@
+% layout 'main';
+% title 'QBTL - Add one';
+
+<h1>Add one missing torrent</h1>
+
+% if (stash('error')) {
+  <p style="color:red;"><%= stash('error') %></p>
+% }
+
+% if (stash('picked')) {
+  <p><b>Picked infohash:</b> <code><%= $picked->{hash} %></code></p>
+  <p><b>Local .torrent:</b> <%= $picked->{source_path} %></p>
+
+  <form method="post" action="/qbt/add_one">
+    <input type="hidden" name="hash" value="<%= $picked->{hash} %>">
+    <input type="hidden" name="source_path" value="<%= $picked->{source_path} %>">
+    <label>
+      <input type="checkbox" name="confirm" value="1">
+      Add this torrent to qBittorrent
+    </label>
+    <div style="margin-top:10px;">
+      <button type="submit">Add</button>
+    </div>
+  </form>
+% } else {
+  <p>No missing torrents found.</p>
+% }

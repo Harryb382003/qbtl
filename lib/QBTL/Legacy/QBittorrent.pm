@@ -13,6 +13,8 @@ use Time::Piece;
 use File::Spec;
 use LWP::UserAgent;
 use HTTP::Cookies;
+use HTTP::Request::Common qw(POST);
+
 
 use lib 'lib/';
 use Logger;
@@ -37,7 +39,6 @@ sub new {
     return $self;
 }
 
-
 sub _login {
 	Logger::debug("#	_login");
     my $self = shift;
@@ -51,7 +52,6 @@ sub _login {
 
     die "Login failed: " . $res->status_line unless $res->is_success;
 }
-
 
 sub get_preferences {
 	Logger::debug("#	get_preferences");
@@ -119,6 +119,157 @@ sub get_torrents_info {
     my $torrents = decode_json($res->decoded_content);
     return $torrents;   # arrayref of hashrefs
 }
+
+sub torrent_exists {
+    my ($self, $hash) = @_;
+
+    my $res = $self->{ua}->get("$self->{base_url}/api/v2/torrents/info?hashes=$hash");
+    die "Failed to check torrent: " . $res->status_line unless $res->is_success;
+
+    my $arr = decode_json($res->decoded_content);
+    return (ref($arr) eq 'ARRAY' && @$arr) ? 1 : 0;
+}
+
+sub add_torrent_file {
+  my ($self, $torrent_path, $savepath) = @_;
+
+  require HTTP::Request::Common;
+
+  my @content = (torrents => [$torrent_path]);
+
+  # THIS is the key: qBittorrent expects the field name "savepath"
+  if (defined $savepath && length $savepath) {
+    push @content, (savepath => $savepath);
+  }
+
+  my $req = HTTP::Request::Common::POST(
+    "$self->{base_url}/api/v2/torrents/add",
+    Content_Type => 'form-data',
+    Content      => \@content,
+  );
+
+  my $res = $self->{ua}->request($req);
+
+  return {
+    ok   => ($res->is_success ? 1 : 0),
+    code => ($res->code // 0),
+    body => ($res->decoded_content // ''),
+  };
+}
+
+sub recheck_hash {
+  my ($self, $hash) = @_;
+  die "bad hash" unless defined $hash && $hash =~ /^[0-9a-f]{40}$/i;
+
+  require HTTP::Request::Common;
+
+  my $req = HTTP::Request::Common::POST(
+    "$self->{base_url}/api/v2/torrents/recheck",
+    Content_Type => 'application/x-www-form-urlencoded',
+    Content      => [ hashes => $hash ],
+  );
+
+  my $res = $self->{ua}->request($req);
+
+  die "Failed to recheck: " . $res->status_line . " body=" . ($res->decoded_content // '')
+    unless $res->is_success;
+
+  return 1;
+}
+
+
+# sub add_torrent_file_paused {
+#     my ($self, $torrent_path) = @_;
+#
+#     die "torrent file not found: $torrent_path" unless -e $torrent_path;
+#
+#     my $req = POST(
+#         "$self->{base_url}/api/v2/torrents/add",
+#         Content_Type => 'form-data',
+#         Content      => [
+#             torrents => [$torrent_path],
+#             paused   => 'true',
+#         ],
+#     );
+#
+#     my $res = $self->{ua}->request($req);
+#
+#     return {
+#         ok   => ($res->is_success ? 1 : 0),
+#         code => ($res->code // 0),
+#         body => ($res->decoded_content // ''),
+#     };
+# }
+
+#
+# sub add_torrent_file {
+#     my ($self, $torrent_path) = @_;
+#
+#     die "torrent file not found: $torrent_path" unless -e $torrent_path;
+#
+#     my $res = $self->{ua}->post(
+#         "$self->{base_url}/api/v2/torrents/add" => form => {
+#             torrents => { file => $torrent_path },
+#         }
+#     );
+#
+#     return {
+#         ok   => ($res->is_success ? 1 : 0),
+#         code => ($res->code // 0),
+#         body => ($res->decoded_content // ''),
+#     };
+# }
+
+
+# sub recheck_hash {
+#     my ($self, $hash) = @_;
+#
+#     my $url = "$self->{base_url}/api/v2/torrents/recheck?hashes=$hash";
+#     my $res = $self->{ua}->get($url);
+#
+#     if (!$res->is_success) {
+#         die "Failed to recheck: " . $res->status_line;
+#     }
+#
+#     return 1;
+# }
+
+# sub delete_hash_keep_files {
+#     my ($self, $hash) = @_;
+#     my $res = $self->{ua}->post("$self->{base_url}/api/v2/torrents/delete" => form => {
+#         hashes      => $hash,
+#         deleteFiles => 'false',
+#     });
+#     die "Failed to delete: " . $res->status_line unless $res->is_success;
+#     return 1;
+# }
+
+
+
+
+# sub pause_hash {
+#     my ($self, $hash) = @_;
+#     my $res = $self->{ua}->post("$self->{base_url}/api/v2/torrents/pause" => form => { hashes => $hash });
+#     die "Failed to pause: " . $res->status_line unless $res->is_success;
+#     return 1;
+# }
+
+# sub add_torrent_file_paused {
+#     my ($self, $torrent_path, %args) = @_;
+#     die "torrent file not found: $torrent_path" unless -e $torrent_path;
+#     my $res = $self->{ua}->post(
+#         "$self->{base_url}/api/v2/torrents/add" => form => {
+#             paused  => 'true',
+#             torrents => { file => $torrent_path },
+#         }
+#     );
+#     return {
+#         ok   => ($res->is_success ? 1 : 0),
+#         code => ($res->code // 0),
+#         body => ($res->decoded_content // ''),
+#     };
+# }
+
 
 #
 #     # --- prune runtime queue: never process quarantined torrents ---

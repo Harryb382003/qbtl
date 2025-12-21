@@ -1,0 +1,61 @@
+% layout 'main';
+% title 'QBTL';
+% my $s  = stash('stats')        || {};
+% my $sc = stash('stage_counts') || {};
+% my $fails = stash('fails')     || [];
+% my $fmt = stash('fmt_ts');
+
+<h2>Dashboard</h2>
+
+% if ($s->{qbt_error}) {
+  <div style="padding:8px; background:#f8d7da; border:1px solid #f5c2c7; margin:8px 0;">
+    <b>qBittorrent error:</b> <%= $s->{qbt_error} %>
+  </div>
+% }
+
+<ul>
+  <li><b>Local unique torrents:</b> <%= $s->{local_unique} // 0 %></li>
+  <li><b>Loaded in qBittorrent:</b> <%= $s->{qbt_loaded} // 0 %></li>
+  <li><b>QBT name-as-hash:</b> <%= $s->{qbt_name_is_hash} // 0 %></li>
+  <li><b>Missing from qBittorrent:</b> <%= $s->{missing_from_qbt} // 0 %></li>
+  <li><b>Repairable (local .torrent found):</b> <%= $s->{repairable} // 0 %></li>
+</ul>
+
+<h3>Runtime stages (counts)</h3>
+% if (keys %$sc) {
+  <ul>
+  % for my $k (sort keys %$sc) {
+    <li><b><%= $k %>:</b> <%= $sc->{$k} %></li>
+  % }
+  </ul>
+% } else {
+  <p><i>No runtime-tracked items yet.</i></p>
+% }
+
+<h3>Failures (per-item)</h3>
+% if (@$fails) {
+  <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;">
+    <tr>
+      <th>Hash</th>
+      <th>Name</th>
+      <th>Stage</th>
+      <th>Reason</th>
+      <th>QBT state</th>
+      <th>Progress</th>
+      <th>Updated</th>
+    </tr>
+    % for my $f (@$fails) {
+      <tr>
+        <td style="font-family:monospace;"><%= substr($f->{hash},0,12) %>…</td>
+        <td><%= $f->{name} %></td>
+        <td><%= $f->{stage} %></td>
+        <td><%= $f->{reason} %></td>
+        <td><%= $f->{last_state} %></td>
+        <td><%= $f->{last_progress} %></td>
+        <td><%= $fmt ? $fmt->($f->{ts}) : ($f->{ts}||'') %></td>
+      </tr>
+    % }
+  </table>
+% } else {
+  <p><i>No failures recorded.</i></p>
+% }

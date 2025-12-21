@@ -1,0 +1,7 @@
+% layout 'main';
+% title 'Rebuild local cache';
+
+<h1>Rebuild local cache</h1>
+<form method="post" action="/localcache/rebuild">
+  <button type="submit">Rebuild now</button>
+</form>

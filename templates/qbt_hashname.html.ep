@@ -1,0 +1,25 @@
+% layout 'main';
+% title 'QBTL - QBT hash-names';
+
+<h1>QBT torrents where name looks like infohash</h1>
+
+<p>Found: <%= $found %></p>
+
+<table border="1" cellspacing="0" cellpadding="6">
+  <tr>
+    <th>hash</th>
+    <th>name</th>
+    <th>state</th>
+    <th>progress</th>
+    <th>save_path</th>
+  </tr>
+  % for my $t (@$sample) {
+    <tr>
+      <td><code><%= $t->{hash} %></code></td>
+      <td><code><%= $t->{name} %></code></td>
+      <td><%= $t->{state} %></td>
+      <td><%= $t->{progress} %></td>
+      <td><%= $t->{save_path} %></td>
+    </tr>
+  % }
+</table>

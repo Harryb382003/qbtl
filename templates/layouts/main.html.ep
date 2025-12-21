@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title><%= title %></title>
+</head>
+<body>
+  <div style="display:flex; gap:12px; align-items:center; padding:8px 0;">
+    <a href="/">Home</a>
+    <a href="/qbt/broken">QBT broken</a>
+    <a href="/qbt/hashnames">QBT hash-names</a>
+    <a href="/qbt/repairable">Repairable</a>
+    <a href="/qbt/add_one">Add one</a>
+    % if (stash('dev_mode')) {
+      <form method="post" action="/localcache/rebuild" style="margin:0;">
+        <button type="submit">Rebuild cache</button>
+      </form>
+      <form method="post" action="/restart" style="margin:0;">
+        <button type="submit">Restart server (dev)</button>
+      </form>
+    % }
+    % if (stash('notice')) {
+      <div class="notice"><%= stash('notice') %></div>
+    % }
+  </div>
+
+  <hr />
+
+  <%= content %>
+</body>
+</html>

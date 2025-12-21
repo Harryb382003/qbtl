@@ -1,0 +1,15 @@
+% layout 'main';
+% title 'QBTL - QBT broken';
+
+<h1>QBT broken (name == infohash)</h1>
+
+<p>Found: <%= $found %></p>
+
+% if (@$sample) {
+  <h3>Sample</h3>
+  <ul>
+    % for my $t (@$sample) {
+      <li><code><%= $t->{hash} %></code> — <%= $t->{state} %> — <%= $t->{save_path} %></li>
+    % }
+  </ul>
+% }

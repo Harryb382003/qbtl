@@ -1,7 +1,8 @@
 package QBTL::Devel;
 
 use common::sense;
-
+use Mojo::IOLoop;
+use Data::Dumper;
 
 #####################################################################
 #           						DEBUGGING ROUTES
@@ -12,9 +13,78 @@ sub register_routes {
   my $r = $app->routes;
 
 
+  $r->post('/localcache/rebuild' => sub {
+  my $c = shift;
+
+  my $local_by_ih = QBTL::LocalCache::build_local_by_ih(
+    root_dir   => ($app->defaults->{root_dir} || '.'),
+    opts_local => { torrent_dir => "/" },
+  );
+
+  $c->render(json => { ok => Mojo::JSON->true, count => scalar(keys %$local_by_ih) });
+  });
+
+  $r->get('/localcache/rebuild' => sub {
+  my $c = shift;
+  return $c->render(template => 'localcache_rebuild');
+});
+
+  $r->get('/qbt/presence_check' => sub {
+  my $c = shift;
+
+  my $qb = QBittorrent->new({});
+  my $list = $qb->get_torrents_info() || [];
+
+  my ($total, $with_hash, $name_is_hash) = (0, 0, 0);
+  my @sample;
+
+  for my $t (@$list) {
+    next if ref($t) ne 'HASH';
+    $total++;
+
+    my $h = $t->{hash} // '';
+    $with_hash++ if $h =~ /^[0-9a-fA-F]{40}$/;
+
+    my $n = $t->{name} // '';
+    if ($n =~ /^[0-9a-fA-F]{40}$/) {
+      $name_is_hash++;
+      push @sample, { hash => $h, name => $n } if @sample < 5;
+    }
+  }
+
+  $c->render(json => {
+    total           => $total,
+    with_hash_40hex => $with_hash,
+    name_is_hash    => $name_is_hash,
+    sample          => \@sample,
+  });
+  });
+
+	$r->post('/shutdown' => sub {
+    my $c = shift;
+      $c->render(text => "Shutting down...");
+    Mojo::IOLoop->next_tick(sub { Mojo::IOLoop->stop });
+  });
+
+	$r->get('/dev_info' => sub {
+		my $c = shift;
+		$c->render(json => { dev_mode => Mojo::JSON->true });
+	});
+
   $r->get('/debug_ping' => sub {
     my $c = shift;
     $c->render(text => "debug ok");
+  });
+
+  $r->post('/debug/rebuild_local_cache' => sub {
+  my $c = shift;
+
+  my $local_by_ih = QBTL::LocalCache::build_local_by_ih(
+    root_dir   => ($c->app->defaults->{root_dir} || '.'),
+    opts_local => { torrent_dir => "/" },
+  );
+
+  $c->render(text => "rebuilt local cache: " . scalar(keys %$local_by_ih));
   });
 
 
@@ -64,9 +134,9 @@ sub register_routes {
     local_sample_keys   => \@local_sample,
     qbt_sample_keys     => \@qbt_sample,
   });
-});
+  });
 
-$r->get('/overlap_debug' => sub {
+  $r->get('/overlap_debug' => sub {
   my $c = shift;
 
   my $opts = { torrent_dir => "/" };  # temporary
@@ -98,10 +168,10 @@ $r->get('/overlap_debug' => sub {
     overlap_found => scalar(@hits),
     overlap_sample => \@hits,
   });
-});
+  });
 
 
-$r->get('/sample_local' => sub {
+  $r->get('/sample_local' => sub {
   my $c = shift;
 
   my $opts = { torrent_dir => "/" };  # temporary
@@ -135,11 +205,10 @@ $r->get('/sample_local' => sub {
   }
 
   $c->render(json => { sample => \@pick });
-});
+  });
 
-use Data::Dumper;
 
-$r->get('/local_entry' => sub {
+  $r->get('/local_entry' => sub {
   my $c  = shift;
   my $ih = $c->param('ih') // '';
 
@@ -162,9 +231,9 @@ $r->get('/local_entry' => sub {
     ref_type => (defined $v ? ref($v) : 'undef'),
     dumped   => Dumper($v),
   });
-});
+  });
 
-$r->get('/qbt_name_is_hash' => sub {
+  $r->get('/qbt_name_is_hash' => sub {
   my $c = shift;
 
   my $opts = {};  # later: load config.json like legacy did
@@ -218,9 +287,19 @@ $r->get('/qbt_name_is_hash' => sub {
       sample => \@hits,
     });
   });
+
+  $r->post('/restart' => sub {
+    my $c = shift;
+      $c->stash(dev_mode => 1);
+      $c->stash(notice   => "Restarting server…");
+  # Render immediately so you see a page, then restart after flush.
+      $c->render(template => 'restart');
+  # After the response is sent, exit 42 so qbtl-run.pl restarts us
+      $c->on(finish => sub {
+    exit 42;
+    });
+  });
   return;
-
-
 }
 
 1;

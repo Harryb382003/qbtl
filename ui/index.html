@@ -7,13 +7,37 @@
 </head>
 <body>
   <h1>QBTL</h1>
+
   <pre id="out">Loading…</pre>
 
+  <button id="kill" style="display:none;">Kill server (dev)</button>
+  <span id="killmsg"></span>
+
   <script>
+    const out = document.getElementById('out');
+    const killBtn = document.getElementById('kill');
+    const killMsg = document.getElementById('killmsg');
+
+    // Health
     fetch('/health')
       .then(r => r.json())
-      .then(j => { document.getElementById('out').textContent = JSON.stringify(j, null, 2); })
-      .catch(e => { document.getElementById('out').textContent = String(e); });
+      .then(j => { out.textContent = JSON.stringify(j, null, 2); })
+      .catch(e => { out.textContent = String(e); });
+
+    // Show kill button only if dev routes exist
+    fetch('/dev_info')
+      .then(r => r.json())
+      .then(j => { if (j && j.dev_mode) killBtn.style.display = ''; })
+      .catch(() => {});
+
+    // Kill server (dev)
+    killBtn.addEventListener('click', () => {
+      fetch('/shutdown', { method: 'POST' })
+        .then(r => r.json())
+        .then(j => { killMsg.textContent = j.msg || 'Stopping…'; })
+        .catch(e => { killMsg.textContent = String(e); });
+    });
   </script>
+  <script src="/app.js"></script>
 </body>
 </html>

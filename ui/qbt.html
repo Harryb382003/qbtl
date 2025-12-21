@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QBTL - QBT</title>
+</head>
+<body>
+  <h1>QBTL - QBT</h1>
+  <pre id="out">Loading…</pre>
+
+  <script src="/app.js"></script>
+  <script>
+    fetch('/qbt_state_preview')
+      .then(r => r.json())
+      .then(j => { document.getElementById('out').textContent = JSON.stringify(j, null, 2); })
+      .catch(e => { document.getElementById('out').textContent = String(e); });
+  </script>
+</body>
+</html>
