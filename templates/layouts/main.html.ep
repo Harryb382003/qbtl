@@ -10,6 +10,7 @@
     <a href="/">Home</a>
     <a href="/qbt/hashnames">QBT hash-names</a>
     <a href="/qbt/repairable">Repairable</a>
+    <a href="/torrents">Torrents</a>
     <a href="/qbt/add_one">Add one</a>
     % if (stash('dev_mode')) {
       <form method="post" action="/tasks/poll" style="margin:0;">

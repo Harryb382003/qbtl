@@ -352,6 +352,13 @@ my $tick = $app->defaults->{observer_last_tick} || 0;
   observer_last_count   => ($app->defaults->{observer_last_count} || 0),
 );
 
+if ($opts->{dev_mode}) {
+    require QBTL::Devel;
+    QBTL::Devel::register_routes($app);
+    $app->log->debug("QBTL::Devel routes registered");
+  }
+
+
   $c->render(template => 'index');
 });
 
@@ -455,25 +462,31 @@ $r->get('/qbt/add_one' => sub {
     root_dir   => ($opts->{root_dir} || '.'),
     opts_local => { torrent_dir => "/" },
   );
-  $local_by_ih = {} if ref($local_by_ih) ne 'HASH';
 
   my $qbt = QBTL::QBT->new(opts => {});
   my $qbt_by_ih = $qbt->get_torrents_infohash;
   $qbt_by_ih = {} if ref($qbt_by_ih) ne 'HASH';
 
   my ($pick_hash) = grep { !exists $qbt_by_ih->{$_} } keys %$local_by_ih;
-
-  return $c->render(template => 'qbt_add_one') unless $pick_hash;
+  if (!$pick_hash) {
+    return $c->render(template => 'qbt_add_one');
+  }
 
   my $rec = $local_by_ih->{$pick_hash};
   my $source_path = (ref($rec) eq 'HASH') ? ($rec->{source_path} // '') : '';
 
-  return $c->render(
-    template => 'qbt_add_one',
-    error    => "Picked $pick_hash but no source_path found",
-  ) unless $source_path;
+  if (!$source_path) {
+    return $c->render(
+      template => 'qbt_add_one',
+      error    => "Picked $pick_hash but no source_path found"
+    );
+  }
 
-  $c->stash(picked => { hash => $pick_hash, source_path => $source_path });
+  $c->stash(picked => {
+    hash        => $pick_hash,
+    source_path => $source_path,
+  });
+
   return $c->render(template => 'qbt_add_one');
 });
 
@@ -961,12 +974,6 @@ $r->get('/qbt/hashnames' => sub {
     });
   });
 
-  if ($opts->{dev_mode}) {
-    require QBTL::Devel;
-    QBTL::Devel::register_routes($app);
-    $app->log->debug("QBTL::Devel routes registered");
-  }
-
   $r->post('/tasks/poll' => sub {
     my $c = shift;
     my $tasks = $app->defaults->{tasks} || {};
@@ -1028,6 +1035,108 @@ $r->get('/qbt/hashnames' => sub {
 SuspectZero=$suspect Missing=$missing");
   return $c->redirect_to('/');
 });
+
+  $r->get('/torrents' => sub {
+  my $c = shift;
+  $c->stash(dev_mode => ($opts->{dev_mode} ? 1 : 0));
+
+  # --- UI controls ---
+  my $mode = $c->param('mode') || 'paginate';  # paginate | scroll
+  my $per  = int($c->param('per')  || 20);
+  my $page = int($c->param('page') || 1);
+  $per  = 20 if $per < 1;
+  $per  = 500 if $per > 500;
+  $page = 1  if $page < 1;
+
+  # filter: all | missing | in_qbt
+  my $show = $c->param('show') || 'missing';
+  $show = 'missing' unless $show eq 'all' || $show eq 'in_qbt' || $show eq 'missing';
+
+  # --- Local cache ---
+  my $local_by_ih = QBTL::LocalCache::get_local_by_ih(
+    root_dir   => ($opts->{root_dir} || '.'),
+    opts_local => { torrent_dir => "/" },
+  );
+  $local_by_ih = {} if ref($local_by_ih) ne 'HASH';
+
+  # --- qBittorrent state ---
+  my $qbt_by_ih = {};
+  my $qbt_err   = '';
+  eval {
+    my $qbt = QBTL::QBT->new(opts => {});
+    my $h   = $qbt->get_torrents_infohash();   # { infohash => {...} }
+    $h = {} if ref($h) ne 'HASH';
+    $qbt_by_ih = $h;
+    1;
+  } or do {
+    $qbt_err = "$@";
+    $qbt_by_ih = {};
+  };
+
+  # --- Build rows ---
+  my @rows;
+  for my $ih (keys %$local_by_ih) {
+    next unless defined($ih) && $ih =~ /^[0-9a-fA-F]{40}$/;
+
+    my $rec = $local_by_ih->{$ih};
+    next unless ref($rec) eq 'HASH';
+
+    my $in_qbt = exists $qbt_by_ih->{lc $ih} ? 1 : 0;
+
+    next if $show eq 'missing' && $in_qbt;
+    next if $show eq 'in_qbt'  && !$in_qbt;
+
+    push @rows, {
+      hash        => lc($ih),
+      name        => ($rec->{name} // ''),
+      bucket      => ($rec->{bucket} // ''),
+      total_size  => ($rec->{total_size} // 0),
+      source_path => ($rec->{source_path} // ''),
+      in_qbt      => $in_qbt,
+    };
+  }
+
+  my $found = scalar(@rows);
+
+  # --- Pagination window (only affects what we render, not overall count) ---
+  my ($pages, $start_n, $end_n) = (1, 0, 0);
+  my @sample = @rows;
+
+  if ($mode eq 'paginate') {
+    $pages = $found ? int(($found + $per - 1) / $per) : 1;
+    $page  = $pages if $page > $pages;
+
+    my $start = ($page - 1) * $per;
+    my $end   = $start + $per - 1;
+    $end      = $found - 1 if $end > $found - 1;
+
+    @sample = ($found && $start <= $end) ? @rows[$start .. $end] : ();
+
+    $start_n = $found ? ($start + 1) : 0;
+    $end_n   = $found ? ($end   + 1) : 0;
+  }
+
+  $c->stash(
+    mode    => $mode,
+    per     => $per,
+    page    => $page,
+    pages   => $pages,
+    start_n => $start_n,
+    end_n   => $end_n,
+    show    => $show,
+
+    found   => $found,
+    sample  => \@sample,
+    qbt_err => $qbt_err,
+  );
+  return $c->render(template => 'torrents');
+});
+
+
+
+
+
+
     # ---------- Idle observer tick ----------
   my $tick_seconds = 5;
   Mojo::IOLoop->recurring($tick_seconds => sub {

@@ -1,0 +1,182 @@
+% layout 'main';
+% title 'QBTL - Torrents';
+
+<h1>Local torrents (from local_by_ih_cache)</h1>
+
+% if (stash('qbt_err')) {
+  <p style="color:#b00;"><b>Warning:</b> qBittorrent state unavailable: <%= stash('qbt_err') %></p>
+% }
+
+<form method="get" action="/torrents" style="margin: 0 0 12px 0;">
+  <label>
+    Show:
+    <select name="show" onchange="this.form.submit()">
+      <option value="missing" <%= ($show||'') eq 'missing' ? 'selected' : '' %>>missing in QBT</option>
+      <option value="in_qbt"  <%= ($show||'') eq 'in_qbt'  ? 'selected' : '' %>>already in QBT</option>
+      <option value="all"     <%= ($show||'') eq 'all'     ? 'selected' : '' %>>all local</option>
+    </select>
+  </label>
+
+  <label style="margin-left: 12px;">
+    Mode:
+    <select name="mode" onchange="this.form.submit()">
+      <option value="scroll" <%= ($mode||'') eq 'scroll' ? 'selected' : '' %>>scroll</option>
+      <option value="paginate" <%= ($mode||'paginate') eq 'paginate' ? 'selected' : '' %>>paginate</option>
+    </select>
+  </label>
+
+  % if (($mode||'paginate') eq 'paginate') {
+    <label style="margin-left: 12px;">
+      Per page:
+      <select name="per" onchange="this.form.submit()">
+        % for my $n (20, 50, 100, 200, 500) {
+          <option value="<%= $n %>" <%= ($per||20) == $n ? 'selected' : '' %>><%= $n %></option>
+        % }
+      </select>
+    </label>
+    <input type="hidden" name="page" value="1">
+  % }
+</form>
+
+<p>
+  Found: <%= $found %>
+  % if (($mode||'paginate') eq 'paginate' && $found) {
+    — showing <%= $start_n %>–<%= $end_n %> (page <%= $page %> / <%= $pages %>)
+  % }
+</p>
+
+% if (($mode||'') eq 'scroll') {
+  <div style="max-height: 70vh; overflow: auto; border: 1px solid #ccc;">
+% }
+
+<table id="sortable" border="1" cellspacing="0" cellpadding="6">
+  <thead>
+    <tr>
+      <th data-type="text">hash</th>
+      <th data-type="text">name</th>
+      <th data-type="text">bucket</th>
+      <th data-type="number">total_size</th>
+      <th data-type="text">source_path</th>
+      <th data-type="text">in_qbt</th>
+      <th data-type="text">action</th>
+    </tr>
+  </thead>
+
+  <tbody>
+    % for my $t (@$sample) {
+      <tr>
+        <td><code><%= $t->{hash} %></code></td>
+        <td><%= $t->{name} %></td>
+        <td><%= $t->{bucket} %></td>
+        <td><%= $t->{total_size} %></td>
+        <td><%= $t->{source_path} %></td>
+        <td><%= $t->{in_qbt} ? 'yes' : 'no' %></td>
+        <td>
+					% if (!$t->{in_qbt}) {
+						<form method="post" action="/qbt/add_one" style="margin:0;">
+							<input type="hidden" name="hash" value="<%= $t->{hash} %>">
+							<input type="hidden" name="source_path" value="<%= $t->{source_path} %>">
+							<label>
+								<input type="checkbox" name="confirm" value="1">
+								Add this torrent to qBittorrent
+							</label>
+							<div style="margin-top:10px;">
+								<button type="submit">Add</button>
+							</div>
+						</form>
+					% } else {
+						<em>—</em>
+					% }
+				</td>
+      </tr>
+    % }
+  </tbody>
+</table>
+
+% if (($mode||'') eq 'scroll') {
+  </div>
+% }
+
+% if (($mode||'paginate') eq 'paginate' && $pages > 1) {
+  <div style="margin-top: 12px;">
+    % if ($page > 1) {
+      <a href="/torrents?show=<%= $show %>&mode=paginate&per=<%= $per %>&page=1">First</a>
+      |
+      <a href="/torrents?show=<%= $show %>&mode=paginate&per=<%= $per %>&page=<%= $page - 1 %>">Prev</a>
+    % } else {
+      First | Prev
+    % }
+
+    &nbsp;&nbsp; Page <%= $page %> / <%= $pages %> &nbsp;&nbsp;
+
+    % if ($page < $pages) {
+      <a href="/torrents?show=<%= $show %>&mode=paginate&per=<%= $per %>&page=<%= $page + 1 %>">Next</a>
+      |
+      <a href="/torrents?show=<%= $show %>&mode=paginate&per=<%= $per %>&page=<%= $pages %>">Last</a>
+    % } else {
+      Next | Last
+    % }
+  </div>
+% }
+
+<script>
+(() => {
+  const table = document.getElementById('sortable');
+  if (!table) return;
+
+  const tbody = table.tBodies[0];
+  const key = "qbt_hashnames_sort_torrents"; // separate key for this page
+
+  const getCellValue = (tr, idx) => tr.children[idx].innerText.trim();
+
+  const comparer = (idx, type, asc) => (a, b) => {
+    let v1 = getCellValue(asc ? a : b, idx);
+    let v2 = getCellValue(asc ? b : a, idx);
+
+    if (type === 'number') {
+      v1 = parseFloat(v1) || 0;
+      v2 = parseFloat(v2) || 0;
+      return v1 - v2;
+    }
+    return v1.localeCompare(v2, undefined, { numeric: true, sensitivity: 'base' });
+  };
+
+  function applySort(colIdx, asc) {
+    const th = table.querySelectorAll("th")[colIdx];
+    if (!th) return;
+
+    const type = th.dataset.type || 'text';
+    const rows = [...tbody.querySelectorAll("tr")];
+
+    rows
+      .sort(comparer(colIdx, type, asc))
+      .forEach(tr => tbody.appendChild(tr));
+
+    // glyphs
+    table.querySelectorAll("th").forEach(h => {
+      h.textContent = h.textContent.replace(/\s*[▲▼]\s*$/, '');
+    });
+    th.textContent = th.textContent.replace(/\s*[▲▼]\s*$/, '') + (asc ? ' ▲' : ' ▼');
+
+    localStorage.setItem(key, JSON.stringify({ colIdx, asc }));
+  }
+
+  // restore previous sort
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) || 'null');
+    if (saved && typeof saved.colIdx === 'number') {
+      applySort(saved.colIdx, !!saved.asc);
+    }
+  } catch (e) {}
+
+  [...table.querySelectorAll("th")].forEach((th, idx) => {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', () => {
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) {}
+      const asc = saved && saved.colIdx === idx ? !saved.asc : true;
+      applySort(idx, asc);
+    });
+  });
+})();
+</script>
