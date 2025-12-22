@@ -1,21 +1,7 @@
 % layout 'main';
-% title 'QBTL';
+% title 'Restarting…';
 
-<p>Restarting… (this page will jump back to the dashboard automatically)</p>
+<h2>Restarting server…</h2>
+<p>Please wait.</p>
 
-<script>
-(async function () {
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-  while (true) {
-    try {
-      const r = await fetch('/health', { cache: 'no-store' });
-      if (r.ok) {
-        window.location.href = '/';
-        return;
-      }
-    } catch (e) {}
-    await sleep(400);
-  }
-})();
-</script>
+<meta http-equiv="refresh" content="2; url=/" />

@@ -499,7 +499,7 @@ Logger::debug("# --- PROCESSING ALL INFOHASHES --- #");
 #             . (defined $save_path ? $save_path : "QBT-default")
 #             . ", category=" . ($meta->{bucket} // "(none)"));
 #
-#         # TODO: $qb->add_torrent($meta->{source_path}, $save_path, $meta->{bucket});
+#         # TODO: $qbt->add_torrent($meta->{source_path}, $save_path, $meta->{bucket});
     }
 
     Logger::info("[MAIN] Finished process_all_infohashes()");

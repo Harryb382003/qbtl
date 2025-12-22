@@ -1,12 +1,13 @@
 % layout 'main';
 % title 'QBTL - Add one';
 
+% my $picked = stash('picked');
+
 <h1>Add one missing torrent</h1>
 
 % if (stash('error')) {
   <p style="color:red;"><%= stash('error') %></p>
 % }
-
 % if (stash('picked')) {
   <p><b>Picked infohash:</b> <code><%= $picked->{hash} %></code></p>
   <p><b>Local .torrent:</b> <%= $picked->{source_path} %></p>

@@ -32,8 +32,8 @@ sub register_routes {
   $r->get('/qbt/presence_check' => sub {
   my $c = shift;
 
-  my $qb = QBittorrent->new({});
-  my $list = $qb->get_torrents_info() || [];
+  my $qbt = QBTL::QBT->new(opts => {});
+  my $list = $qbt->get_torrents_info() || [];
 
   my ($total, $with_hash, $name_is_hash) = (0, 0, 0);
   my @sample;
@@ -238,24 +238,24 @@ sub register_routes {
 
   my $opts = {};  # later: load config.json like legacy did
 
-  my $qb = eval { QBittorrent->new($opts) };
-  if ($@) { return $c->render(json => { error => "QBittorrent->new: $@" }); }
+  my $qbt = eval { QBTL::QBT->new(opts => $opts) };
+  if ($@) { return $c->render(json => { error => "QBTL::QBT->new: $@" }); }
 
   # Try to get full torrent list from the legacy module.
 #   my $list = eval {
-#     if ($qb->can('get_torrents')) {
-#       return $qb->get_torrents();                 # guessed
-#     } elsif ($qb->can('torrents_info')) {
-#       return $qb->torrents_info();                # guessed
-#     } elsif ($qb->can('get_torrents_list')) {
-#       return $qb->get_torrents_list();            # guessed
+#     if ($qbt->can('get_torrents')) {
+#       return $qbt->get_torrents();                 # guessed
+#     } elsif ($qbt->can('torrents_info')) {
+#       return $qbt->torrents_info();                # guessed
+#     } elsif ($qbt->can('get_torrents_list')) {
+#       return $qbt->get_torrents_list();            # guessed
 #     } else {
 #       die "No method found to fetch torrent list (tried get_torrents/torrents_info/get_torrents_list)";
 #     }
 #   };
 #   if ($@) { return $c->render(json => { error => "fetch list: $@" }); }
 
-  my $list = eval { $qb->get_torrents_info() };
+  my $list = eval { $qbt->get_torrents_info() };
   if ($@) {
     return $c->render(json => { error => "fetch list: $@" });
   }
@@ -290,15 +290,19 @@ sub register_routes {
 
   $r->post('/restart' => sub {
     my $c = shift;
-      $c->stash(dev_mode => 1);
-      $c->stash(notice   => "Restarting server…");
-  # Render immediately so you see a page, then restart after flush.
-      $c->render(template => 'restart');
-  # After the response is sent, exit 42 so qbtl-run.pl restarts us
-      $c->on(finish => sub {
-    exit 42;
+    return $c->render(text => "dev-mode required", status => 403)
+    unless $c->app->defaults->{dev_mode};
+  # Render the page NOW (so the browser definitely receives HTML)
+    $c->stash(notice => "Restarting server…");
+    $c->render(template => 'restart');
+  # Then restart shortly after the response is on the wire
+    my $app = $c->app;
+    Mojo::IOLoop->timer(0.15 => sub {
+      $app->log->debug("[devel] restart requested -> exiting 42");
+      CORE::exit(42);   # qbtl-run.pl restarts on 42
     });
   });
+
   return;
 }
 

@@ -1,0 +1,122 @@
+package QBTL::QBT;
+use common::sense;
+
+use Mojo::JSON qw(decode_json);
+use QBittorrent;
+
+sub new {
+  my ($class, %args) = @_;
+  my $opts = $args{opts} || {};
+
+  # Use legacy ONLY to bootstrap UA/base_url/auth correctly.
+  my $legacy = QBittorrent->new($opts);
+
+  my $self = bless {
+    opts     => $opts,
+    legacy   => $legacy,
+    ua       => $legacy->{ua},
+    base_url => $legacy->{base_url},
+  }, $class;
+
+  die "QBTL::QBT->new: missing ua/base_url (legacy init failed?)"
+    unless $self->{ua} && $self->{base_url};
+
+  return $self;
+}
+
+sub _legacy { shift->{legacy} }
+
+# -------------------------------------------------------------------
+# Moved out of legacy: READ + RECHECK (the ones we need right now)
+# -------------------------------------------------------------------
+
+sub get_torrents_info {
+  my ($self) = @_;
+
+  my $res = $self->{ua}->get("$self->{base_url}/api/v2/torrents/info");
+  die "Failed to get torrents: " . $res->status_line
+    unless $res->is_success;
+
+  my $torrents = decode_json($res->decoded_content);
+  return $torrents;   # arrayref of hashrefs
+}
+
+sub get_torrents_infohash {
+  my ($self) = @_;
+
+  my $list = $self->get_torrents_info() || [];
+  my %by_ih = map {
+    my $h = $_->{hash} // '';
+    $h => $_
+  } grep {
+    ref($_) eq 'HASH' && ($_->{hash} // '') =~ /^[0-9a-fA-F]{40}$/
+  } @$list;
+
+  return \%by_ih;     # { infohash => {torrent fields...} }
+}
+
+sub torrent_info {
+  my ($self, $hash) = @_;
+  die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-f]{40}$/;
+
+  my $res = $self->{ua}->get("$self->{base_url}/api/v2/torrents/info?hashes=$hash");
+  die "torrent_info failed: " . $res->status_line
+    unless $res->is_success;
+
+  my $arr = decode_json($res->decoded_content);
+  return (ref($arr) eq 'ARRAY' && @$arr) ? $arr->[0] : {};
+}
+
+# Keep the old name so we don't have to chase callers.
+sub torrent_info_one {
+  my ($self, $hash) = @_;
+  return $self->torrent_info($hash);
+}
+
+sub torrent_exists {
+  my ($self, $hash) = @_;
+  my $t = $self->torrent_info_one($hash);
+  return (ref($t) eq 'HASH' && ($t->{hash} // '') =~ /^[0-9a-f]{40}$/) ? 1 : 0;
+}
+
+sub recheck_hash {
+  my ($self, $hash) = @_;
+  die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-f]{40}$/;
+
+  my $res = $self->{ua}->post(
+    "$self->{base_url}/api/v2/torrents/recheck",
+    form => { hashes => $hash },
+  );
+
+  die "Failed to recheck: " . $res->status_line . " body=" . ($res->decoded_content // '')
+    unless $res->is_success;
+
+  return 1;
+}
+
+# -------------------------------------------------------------------
+# Resume / Start (needed for "resume after recheck")
+# -------------------------------------------------------------------
+
+sub resume_hash {
+  my ($self, $hash) = @_;
+  die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-f]{40}$/;
+
+  my $res = $self->{ua}->post(
+    "$self->{base_url}/api/v2/torrents/resume",
+    form => { hashes => $hash },
+  );
+
+  die "Failed to resume: " . $res->status_line . " body=" . ($res->decoded_content // '')
+    unless $res->is_success;
+
+  return 1;
+}
+
+# Optional alias if you prefer calling it "start" elsewhere
+sub start_hash {
+  my ($self, $hash) = @_;
+  return $self->resume_hash($hash);
+}
+
+1;

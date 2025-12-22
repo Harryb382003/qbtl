@@ -1,9 +1,11 @@
 % layout 'main';
 % title 'QBTL';
-% my $s  = stash('stats')        || {};
-% my $sc = stash('stage_counts') || {};
-% my $fails = stash('fails')     || [];
-% my $fmt = stash('fmt_ts');
+
+% my $s     = stash('stats')        || {};
+% my $sc    = stash('stage_counts') || {};
+% my $fails = stash('fail_items')   || [];
+% my $fmt   = stash('fmt_ts');
+% my $rt    = stash('runtime_total') // 0;
 
 <h2>Dashboard</h2>
 
@@ -22,40 +24,31 @@
 </ul>
 
 <h3>Runtime stages (counts)</h3>
-% if (keys %$sc) {
+
+% if ($rt > 0) {
   <ul>
-  % for my $k (sort keys %$sc) {
-    <li><b><%= $k %>:</b> <%= $sc->{$k} %></li>
-  % }
+    <li>Total runtime-tracked: <%= $rt %></li>
+    % for my $k (sort keys %$sc) {
+      <li><%= $k %>: <%= $sc->{$k} %></li>
+    % }
   </ul>
 % } else {
-  <p><i>No runtime-tracked items yet.</i></p>
+  <p>No runtime-tracked items yet.</p>
 % }
+
+<h3>Observer</h3>
+<ul>
+  <li>last_tick: <%= stash('observer_last_tick') || '(none)' %></li>
+  <li>last_count: <%= stash('observer_last_count') || 0 %></li>
+</ul>
 
 <h3>Failures (per-item)</h3>
 % if (@$fails) {
-  <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;">
-    <tr>
-      <th>Hash</th>
-      <th>Name</th>
-      <th>Stage</th>
-      <th>Reason</th>
-      <th>QBT state</th>
-      <th>Progress</th>
-      <th>Updated</th>
-    </tr>
+  <ul>
     % for my $f (@$fails) {
-      <tr>
-        <td style="font-family:monospace;"><%= substr($f->{hash},0,12) %>…</td>
-        <td><%= $f->{name} %></td>
-        <td><%= $f->{stage} %></td>
-        <td><%= $f->{reason} %></td>
-        <td><%= $f->{last_state} %></td>
-        <td><%= $f->{last_progress} %></td>
-        <td><%= $fmt ? $fmt->($f->{ts}) : ($f->{ts}||'') %></td>
-      </tr>
+      <li><code><%= $f->{hash} %></code> — <%= $f->{reason} %></li>
     % }
-  </table>
+  </ul>
 % } else {
-  <p><i>No failures recorded.</i></p>
+  <p>No failures recorded.</p>
 % }

@@ -6,43 +6,23 @@ use Utils ();
 
 sub derive_savepath_from_payload {
   my (%args) = @_;
-  my $rec = $args{rec} || {};
+  my $rec   = $args{rec}   || {};
+  my $dbg   = $args{debug};   # optional arrayref
 
   return (undef, "bad rec") if ref($rec) ne 'HASH';
   my $files = $rec->{files};
   return (undef, "no files[]") if ref($files) ne 'ARRAY' || !@$files;
 
-  # Single-file torrent: savepath is simply the directory containing the payload file.
-  if (@$files == 1) {
-    my $rel = $files->[0]{path}   // '';
-    my $len = $files->[0]{length} // 0;
-    return (undef, "single-file has no path") unless length $rel;
-
-    my ($leaf) = $rel =~ m{([^/]+)\z};
-    return (undef, "single-file leaf missing") unless $leaf;
-
-    Logger::debug("[savepath] single try leaf=[$leaf] t_len=$len rel=[$rel]");
-
-    my $hit = Utils::locate_payload_files_named($leaf, $len);
-    if (!$hit) { $hit = Utils::locate_payload_files_named($leaf); }
-    return (undef, "single-file no Spotlight hit for [$leaf]") unless $hit && -f $hit;
-
-    my $hsz = (-e $hit) ? (-s $hit) : -1;
-    Logger::debug("[savepath] single hit=[$hit] hit_size=$hsz");
-
-    # Size acceptance: exact match OR either side is 0 (reserve-space / recovery zero-byte)
-    if (!($len == $hsz || $len == 0 || $hsz == 0)) {
-      return (undef, "single-file size mismatch: torrent_len=$len hit_size=$hsz");
-    }
-
-    my $savepath = dirname($hit);
-    return ($savepath, "single anchor=$leaf hit=$hit");
-  }
-
-  # Multi-file: pick anchors and infer savepath by stripping rel suffix; verify under root.
+  # 1) pick anchors: largest-first, skip junk
   my @anchors = _pick_anchors($files, 8);
   return (undef, "no usable anchors") if !@anchors;
 
+  my $push_dbg = sub {
+    return unless $dbg && ref($dbg) eq 'ARRAY';
+    push @$dbg, @_;
+  };
+
+  # 2) try anchors until we get a clean savepath
   for my $a (@anchors) {
     my $rel = $a->{path}   // '';
     my $len = $a->{length} // 0;
@@ -51,32 +31,69 @@ sub derive_savepath_from_payload {
     my ($leaf) = $rel =~ m{([^/]+)\z};
     next unless $leaf;
 
-    Logger::debug("[savepath] multi try leaf=[$leaf] t_len=$len rel=[$rel]");
+    my %attempt = (
+      anchor_rel => $rel,
+      leaf       => $leaf,
+      want_len   => $len,
+      hit_size   => '',
+      hit_any    => '',
+      savepath   => '',
+      verify     => [],
+    );
 
+    # --- Spotlight hit (size-locked first) ---
     my $hit = Utils::locate_payload_files_named($leaf, $len);
-    if (!$hit) { $hit = Utils::locate_payload_files_named($leaf); }
-    next unless $hit && -f $hit;
+    $attempt{hit_size} = $hit // '';
 
-    my $hsz = (-e $hit) ? (-s $hit) : -1;
-    Logger::debug("[savepath] multi hit=[$hit] hit_size=$hsz");
+    # If size-locked search misses, retry without size (renames/metadata quirks happen)
+    if (!$hit) {
+      $hit = Utils::locate_payload_files_named($leaf);
+      $attempt{hit_any} = $hit // '';
+    }
 
-    # Same size rule: exact OR either side 0
-    next unless ($len == $hsz || $len == 0 || $hsz == 0);
+    unless ($hit && -f $hit) {
+      $attempt{reject} = "no_hit";
+      $push_dbg->(\%attempt);
+      next;
+    }
 
+    # --- derive savepath by stripping the torrent-relative path ---
     my $savepath = _savepath_from_hit($hit, $rel);
-    next unless defined $savepath && length $savepath;
+    $attempt{savepath} = $savepath // '';
 
-    # Verify a couple files exist under root; allow 0-byte size tolerance too.
-    my $ok = _verify_under_root_lenient($savepath, $files, 2);
-    return ($savepath, "multi anchor=$leaf hit=$hit") if $ok;
+    unless (defined $savepath && length $savepath) {
+      $attempt{reject} = "savepath_from_hit_failed";
+      $push_dbg->(\%attempt);
+      next;
+    }
+
+    # --- lightweight verification: check 2 more files exist under computed root ---
+    my ($ok, $verify_rows) = _verify_under_root($savepath, $files, 2);
+    $attempt{verify} = $verify_rows if $verify_rows;
+
+    if ($ok) {
+      $attempt{accept} = 1;
+      $push_dbg->(\%attempt);
+      return ($savepath, "anchor=$leaf hit=$hit");
+    }
+
+    $attempt{reject} = "verify_failed";
+    $push_dbg->(\%attempt);
   }
 
-  my @leaf = map { (($_->{path} // '') =~ m{([^/]+)\z}) ? $1 : '' } @anchors;
+  my @leaf = map {
+    (($_->{path} // '') =~ m{([^/]+)\z}) ? $1 : ''
+  } @anchors;
   @leaf = grep { length } @leaf;
+
+  my $max = $#leaf < 4 ? $#leaf : 4;
+  my $anchors_str = $max >= 0
+    ? join(",\n  ", @leaf[0 .. $max])
+    : '';
+
   return (
     undef,
-    "no verified payload match via Spotlight (anchors=" .
-      join(", ", @leaf[0 .. ($#leaf < 4 ? $#leaf : 4)]) . ")",
+    "no verified payload match via Spotlight (anchors=\n  $anchors_str\n)",
   );
 }
 
@@ -159,21 +176,63 @@ sub _verify_under_root {
   my ($root, $files, $need) = @_;
   $need ||= 2;
 
-  my $found = 0;
+  return (0, []) unless defined($root) && length($root);
+  return (0, []) unless ref($files) eq 'ARRAY' && @$files;
+
+  my @rows;
+  my $checked = 0;
+
   for my $f (@$files) {
     next unless ref($f) eq 'HASH';
     my $rel = $f->{path} // '';
     next unless length $rel;
 
-    my $abs = "$root/$rel";
-    $abs =~ s{/+}{/}g;
+    my $full = "$root/$rel";
+    my $exists = (-e $full) ? 1 : 0;
 
-    if (-e $abs) {
-      $found++;
-      return 1 if $found >= $need;
-    }
+    push @rows, { rel => $rel, full => $full, exists => $exists };
+
+    $checked++;
+    last if $checked >= $need;
   }
-  return 0;
+
+  my $ok = 1;
+  for my $r (@rows) {
+    $ok = 0 unless $r->{exists};
+  }
+
+  return ($ok, \@rows);
+}
+
+sub _verify_under_root_lenient {
+  my ($root, $files, $need) = @_;
+  $need ||= 2;
+
+  return 0 unless defined $root && length $root;
+  return 0 unless ref($files) eq 'ARRAY' && @$files;
+
+  my $ok = 0;
+
+  for my $f (@$files) {
+    next unless ref($f) eq 'HASH';
+    my $rel = $f->{path}   // '';
+    my $len = $f->{length} // 0;
+    next unless length $rel;
+
+    my $full = "$root/$rel";
+    next unless -e $full;          # must exist
+
+    # If expected length is >0, require exact size match
+    if ($len > 0) {
+      next unless -f $full;
+      next unless (-s $full) == $len;
+    }
+
+    $ok++;
+    last if $ok >= $need;
+  }
+
+  return ($ok >= $need) ? 1 : 0;
 }
 
 1;
