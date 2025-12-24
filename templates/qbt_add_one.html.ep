@@ -6,7 +6,7 @@
 <h1>Add one missing torrent</h1>
 
 % if (stash('error')) {
-  <p style="color:red;"><%= stash('error') %></p>
+    <pre style="color:red; white-space:pre-wrap;"><%= stash('error') %></pre>
 % }
 % if (stash('picked')) {
   <p><b>Picked infohash:</b> <code><%= $picked->{hash} %></code></p>

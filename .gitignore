@@ -30,6 +30,7 @@ temp/
 *.swm
 *.swn
 *.err
+*.ERR
 *.pid
 *.seed
 *.lock
@@ -132,6 +133,7 @@ perl-stacktrace.txt
 .metadata/
 nbproject/
 *~
+*.kate-swp
 
 # -------------------------------------------------
 # Version control metadata
@@ -142,16 +144,7 @@ nbproject/
 .hg/
 .svn/
 
-# -------------------------------------------------
-# qBittorrent / Torrent fixer-specific
-# -------------------------------------------------
-duplicates/
-results/
-export_dir/
-export_dir_fin/
-*.torrent
-*.magnet
-*.json
+
 # -------------------------------------------------
 # macOS-specific extended attributes
 # -------------------------------------------------
@@ -165,10 +158,5 @@ Icon?
 !*.pl
 !*.pm
 !*.t
-torrent_fixer.pl.kate-swp
-.sandbox/
-.sandbox/
-torrent_fixer_diff.txt
-lib/TorrentParser.pm.derp
-temp_ignore/
-l_parsed_snapshot.pl
+.scratch
+db/local_by_ih_cache.json

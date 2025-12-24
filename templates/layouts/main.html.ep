@@ -13,12 +13,16 @@
     <a href="/torrents">Torrents</a>
     <a href="/qbt/add_one">Add one</a>
     % if (stash('dev_mode')) {
+      % my $ts = stash('local_cache_mtime') // app->defaults->{local_cache_mtime} // 0;
+      % my $label = $ts ? scalar(localtime($ts)) : 'never';
       <form method="post" action="/tasks/poll" style="margin:0;">
         <button type="submit">Poll recheck → maybe resume</button>
       </form>
       <form method="post" action="/localcache/rebuild" style="margin:0;">
-        <button type="submit">Rebuild cache</button>
-      </form>
+        <button class="btn-rebuild">Rebuild Cache<br>
+    <small>Last: <%= $label %></small>
+  </button>
+</form>
       <form method="post" action="/restart" style="margin:0;">
         <button type="submit">Restart server (dev)</button>
       </form>

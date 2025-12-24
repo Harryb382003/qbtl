@@ -1,30 +1,53 @@
 package QBTL::QBT;
 use common::sense;
+use HTTP::Cookies;
+use LWP::UserAgent;
 
 use Mojo::JSON qw(decode_json);
-use QBittorrent;   # legacy bootstrap only
+#use QBittorrent;   # legacy bootstrap only
 
 sub new {
-  my ($class, %args) = @_;
-  my $opts = $args{opts} || {};
-
-  # Bootstrap UA/base_url/auth via legacy object
-  my $legacy = QBittorrent->new($opts);
-
-  my $self = bless {
-    opts     => $opts,
-    legacy   => $legacy,
-    ua       => $legacy->{ua},
-    base_url => $legacy->{base_url},
-  }, $class;
-
-  die "QBTL::QBT->new: missing ua/base_url (legacy init failed?)"
-    unless $self->{ua} && $self->{base_url};
-
-  return $self;
+	Logger::debug("#	new");
+    my ($class, $opts) = @_;
+    my $self = {
+        base_url => $opts->{base_url} || 'http://localhost:8080',
+        username => $opts->{username} || 'admin',
+        password => $opts->{password} || 'adminadmin',
+        ua       => LWP::UserAgent->new(cookie_jar => HTTP::Cookies->new),
+        %$opts,
+    };
+    bless $self, $class;
+    $self->_login;
+    return $self;
 }
 
-sub _legacy { shift->{legacy} }
+#   my $self = bless {
+#     opts     => $opts,
+#     legacy   => $legacy,
+#     ua       => $legacy->{ua},
+#     base_url => $legacy->{base_url},
+#   }, $class;
+#
+#   die "QBTL::QBT->new: missing ua/base_url (legacy init failed?)"
+#     unless $self->{ua} && $self->{base_url};
+#
+#   return $self;
+# }
+
+sub _login {
+	Logger::debug("#	_login");
+    my $self = shift;
+    my $res = $self->{ua}->post(
+        "$self->{base_url}/api/v2/auth/login",
+        {
+            username => $self->{username},
+            password => $self->{password}
+        }
+    );
+
+    die "Login failed: " . $res->status_line unless $res->is_success;
+}
+#sub _legacy { shift->{legacy} }
 
 # ------------------------------
 # Read

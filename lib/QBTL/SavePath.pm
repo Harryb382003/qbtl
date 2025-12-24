@@ -6,7 +6,7 @@ use Utils ();
 
 sub derive_savepath_from_payload {
   my (%args) = @_;
-  my $rec   = $args{rec}   || {};
+  my $rec   = $args{rec}     || {};
   my $dbg   = $args{debug};   # optional arrayref
 
   return (undef, "bad rec") if ref($rec) ne 'HASH';
@@ -30,6 +30,7 @@ sub derive_savepath_from_payload {
 
     my ($leaf) = $rel =~ m{([^/]+)\z};
     next unless $leaf;
+    next unless _is_video_path($leaf);   # never anchor on non-video
 
     my %attempt = (
       anchor_rel => $rel,
@@ -68,8 +69,8 @@ sub derive_savepath_from_payload {
     }
 
     # --- lightweight verification: check 2 more files exist under computed root ---
-    my ($ok, $verify_rows) = _verify_under_root($savepath, $files, 2);
-    $attempt{verify} = $verify_rows if $verify_rows;
+    my $ok = _verify_under_root_lenient($savepath, $files, 2);
+    $attempt{verify} = [ "lenient_ok=" . ($ok ? 1 : 0) ];
 
     if ($ok) {
       $attempt{accept} = 1;
@@ -79,6 +80,7 @@ sub derive_savepath_from_payload {
 
     $attempt{reject} = "verify_failed";
     $push_dbg->(\%attempt);
+    next;
   }
 
   my @leaf = map {
@@ -86,10 +88,7 @@ sub derive_savepath_from_payload {
   } @anchors;
   @leaf = grep { length } @leaf;
 
-  my $max = $#leaf < 4 ? $#leaf : 4;
-  my $anchors_str = $max >= 0
-    ? join(",\n  ", @leaf[0 .. $max])
-    : '';
+  my $anchors_str = @leaf ? join(",\n  ", @leaf) : '';
 
   return (
     undef,
@@ -145,6 +144,17 @@ sub _pick_anchors {
   }
 
   return @out;
+}
+
+sub _is_video_path {
+  my ($path) = @_;
+  return 0 unless defined $path && length $path;
+
+  # strip any query fragments just in case (rare, but harmless)
+  $path =~ s/[?#].*\z//;
+
+  # allowlist extensions (add/remove as you like)
+  return $path =~ /\.(?:mp4|mkv|avi|mov|wmv|m4v|mpg|mpeg|ts|m2ts|webm|flv)\z/i ? 1 : 0;
 }
 
 sub _savepath_from_hit {
@@ -208,31 +218,45 @@ sub _verify_under_root_lenient {
   my ($root, $files, $need) = @_;
   $need ||= 2;
 
-  return 0 unless defined $root && length $root;
-  return 0 unless ref($files) eq 'ARRAY' && @$files;
+  my @rows;
+
+  return (0, ["bad root"]) unless defined $root && length $root;
+  return (0, ["bad files[]"]) unless ref($files) eq 'ARRAY' && @$files;
 
   my $ok = 0;
 
   for my $f (@$files) {
     next unless ref($f) eq 'HASH';
+
     my $rel = $f->{path}   // '';
     my $len = $f->{length} // 0;
     next unless length $rel;
 
     my $full = "$root/$rel";
-    next unless -e $full;          # must exist
 
-    # If expected length is >0, require exact size match
-    if ($len > 0) {
-      next unless -f $full;
-      next unless (-s $full) == $len;
+    if (!-e $full) {
+      push @rows, "MISS: $rel";
+      next;
     }
 
+    if ($len > 0) {
+      if (!-f $full) {
+        push @rows, "MISS(not file): $rel";
+        next;
+      }
+      my $sz = -s $full;
+      if (!defined $sz || $sz != $len) {
+        push @rows, "MISS(size $sz != $len): $rel";
+        next;
+      }
+    }
+
+    push @rows, "OK: $rel";
     $ok++;
     last if $ok >= $need;
   }
 
-  return ($ok >= $need) ? 1 : 0;
+  return (($ok >= $need) ? 1 : 0, \@rows);
 }
 
 1;

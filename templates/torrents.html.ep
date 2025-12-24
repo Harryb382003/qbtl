@@ -1,63 +1,70 @@
 % layout 'main';
 % title 'QBTL - Torrents';
 
-<h1>Local torrents (from local_by_ih_cache)</h1>
+% my $mode   = stash('mode')  // 'scroll';
+% my $per    = stash('per')   // 50;
+% my $page   = stash('page')  // 1;
+% my $pages  = stash('pages') // 1;
+% my $q      = stash('q')     // '';
+% my $found  = stash('found') // 0;
+% my $start_n = stash('start_n') // 0;
+% my $end_n   = stash('end_n') // 0;
+% my $sample = stash('sample') || [];
+% my $human  = stash('human');
 
-% if (stash('qbt_err')) {
-  <p style="color:#b00;"><b>Warning:</b> qBittorrent state unavailable: <%= stash('qbt_err') %></p>
-% }
+<h1>Local torrents (from cache)</h1>
 
 <form method="get" action="/torrents" style="margin: 0 0 12px 0;">
   <label>
-    Show:
-    <select name="show" onchange="this.form.submit()">
-      <option value="missing" <%= ($show||'') eq 'missing' ? 'selected' : '' %>>missing in QBT</option>
-      <option value="in_qbt"  <%= ($show||'') eq 'in_qbt'  ? 'selected' : '' %>>already in QBT</option>
-      <option value="all"     <%= ($show||'') eq 'all'     ? 'selected' : '' %>>all local</option>
-    </select>
+    Search:
+    <input type="text" name="q" value="<%= $q %>" style="min-width: 380px;" placeholder="hash, name, or source_path">
   </label>
 
   <label style="margin-left: 12px;">
     Mode:
     <select name="mode" onchange="this.form.submit()">
-      <option value="scroll" <%= ($mode||'') eq 'scroll' ? 'selected' : '' %>>scroll</option>
-      <option value="paginate" <%= ($mode||'paginate') eq 'paginate' ? 'selected' : '' %>>paginate</option>
+      <option value="scroll" <%= $mode eq 'scroll' ? 'selected' : '' %>>scroll</option>
+      <option value="paginate" <%= $mode eq 'paginate' ? 'selected' : '' %>>paginate</option>
     </select>
   </label>
 
-  % if (($mode||'paginate') eq 'paginate') {
+  % if ($mode eq 'paginate') {
     <label style="margin-left: 12px;">
       Per page:
       <select name="per" onchange="this.form.submit()">
         % for my $n (20, 50, 100, 200, 500) {
-          <option value="<%= $n %>" <%= ($per||20) == $n ? 'selected' : '' %>><%= $n %></option>
+          <option value="<%= $n %>" <%= $per == $n ? 'selected' : '' %>><%= $n %></option>
         % }
       </select>
     </label>
     <input type="hidden" name="page" value="1">
   % }
+
+  <button type="submit" style="margin-left: 12px;">Go</button>
 </form>
 
 <p>
   Found: <%= $found %>
-  % if (($mode||'paginate') eq 'paginate' && $found) {
-    — showing <%= $start_n %>–<%= $end_n %> (page <%= $page %> / <%= $pages %>)
+  % if ($found) {
+    — showing <%= $start_n %>–<%= $end_n %>
+    % if ($mode eq 'paginate') {
+      (page <%= $page %> / <%= $pages %>)
+    % }
   % }
 </p>
 
-% if (($mode||'') eq 'scroll') {
+% if ($mode eq 'scroll') {
   <div style="max-height: 70vh; overflow: auto; border: 1px solid #ccc;">
 % }
 
 <table id="sortable" border="1" cellspacing="0" cellpadding="6">
   <thead>
     <tr>
-      <th data-type="text">hash</th>
       <th data-type="text">name</th>
-      <th data-type="text">bucket</th>
+      <th data-type="text">hash</th>
       <th data-type="number">total_size</th>
+      <th data-type="number">files</th>
       <th data-type="text">source_path</th>
-      <th data-type="text">in_qbt</th>
       <th data-type="text">action</th>
     </tr>
   </thead>
@@ -65,44 +72,42 @@
   <tbody>
     % for my $t (@$sample) {
       <tr>
-        <td><code><%= $t->{hash} %></code></td>
         <td><%= $t->{name} %></td>
-        <td><%= $t->{bucket} %></td>
-        <td><%= $t->{total_size} %></td>
+        <td><code><%= $t->{hash} %></code></td>
+        <td><%= $human ? $human->($t->{total_size}) : ($t->{total_size}||0) %></td>
+        <td><%= $t->{files_count} %></td>
         <td><%= $t->{source_path} %></td>
-        <td><%= $t->{in_qbt} ? 'yes' : 'no' %></td>
         <td>
-					% if (!$t->{in_qbt}) {
-						<form method="post" action="/qbt/add_one" style="margin:0;">
-							<input type="hidden" name="hash" value="<%= $t->{hash} %>">
-							<input type="hidden" name="source_path" value="<%= $t->{source_path} %>">
-							<label>
-								<input type="checkbox" name="confirm" value="1">
-								Add this torrent to qBittorrent
-							</label>
-							<div style="margin-top:10px;">
-								<button type="submit">Add</button>
-							</div>
-						</form>
-					% } else {
-						<em>—</em>
-					% }
-				</td>
+          % if (stash('dev_mode')) {
+            <form method="post" action="/qbt/add_one" style="display:inline; margin:0;">
+              <input type="hidden" name="hash" value="<%= $t->{hash} %>">
+              <input type="hidden" name="source_path" value="<%= $t->{source_path} %>">
+              <input type="hidden" name="confirm" value="1">
+              <input type="hidden" name="return_to" value="/torrents">
+              <button type="submit">Add</button>
+              </form>
+            % } else {
+            <em>dev</em>
+          % }
+        </td>
       </tr>
     % }
   </tbody>
 </table>
 
-% if (($mode||'') eq 'scroll') {
+% if ($mode eq 'scroll') {
   </div>
 % }
 
-% if (($mode||'paginate') eq 'paginate' && $pages > 1) {
+% if ($mode eq 'paginate' && $pages > 1) {
   <div style="margin-top: 12px;">
+    % my $qs = $q;
+    % $qs =~ s/([^A-Za-z0-9_.~-])/sprintf("%%%02X", ord($1))/eg;  # crude url-escape
+
     % if ($page > 1) {
-      <a href="/torrents?show=<%= $show %>&mode=paginate&per=<%= $per %>&page=1">First</a>
+      <a href="/torrents?mode=paginate&per=<%= $per %>&page=1&q=<%= $qs %>">First</a>
       |
-      <a href="/torrents?show=<%= $show %>&mode=paginate&per=<%= $per %>&page=<%= $page - 1 %>">Prev</a>
+      <a href="/torrents?mode=paginate&per=<%= $per %>&page=<%= $page - 1 %>&q=<%= $qs %>">Prev</a>
     % } else {
       First | Prev
     % }
@@ -110,9 +115,9 @@
     &nbsp;&nbsp; Page <%= $page %> / <%= $pages %> &nbsp;&nbsp;
 
     % if ($page < $pages) {
-      <a href="/torrents?show=<%= $show %>&mode=paginate&per=<%= $per %>&page=<%= $page + 1 %>">Next</a>
+      <a href="/torrents?mode=paginate&per=<%= $per %>&page=<%= $page + 1 %>&q=<%= $qs %>">Next</a>
       |
-      <a href="/torrents?show=<%= $show %>&mode=paginate&per=<%= $per %>&page=<%= $pages %>">Last</a>
+      <a href="/torrents?mode=paginate&per=<%= $per %>&page=<%= $pages %>&q=<%= $qs %>">Last</a>
     % } else {
       Next | Last
     % }
@@ -124,9 +129,6 @@
   const table = document.getElementById('sortable');
   if (!table) return;
 
-  const tbody = table.tBodies[0];
-  const key = "qbt_hashnames_sort_torrents"; // separate key for this page
-
   const getCellValue = (tr, idx) => tr.children[idx].innerText.trim();
 
   const comparer = (idx, type, asc) => (a, b) => {
@@ -134,49 +136,55 @@
     let v2 = getCellValue(asc ? b : a, idx);
 
     if (type === 'number') {
-      v1 = parseFloat(v1) || 0;
-      v2 = parseFloat(v2) || 0;
-      return v1 - v2;
+      // try to parse "1.2 GB" etc by grabbing leading number; fallback 0
+      const n1 = parseFloat(v1.replace(/[^0-9.]/g, '')) || 0;
+      const n2 = parseFloat(v2.replace(/[^0-9.]/g, '')) || 0;
+      return n1 - n2;
     }
+
     return v1.localeCompare(v2, undefined, { numeric: true, sensitivity: 'base' });
   };
 
-  function applySort(colIdx, asc) {
-    const th = table.querySelectorAll("th")[colIdx];
+  const key = "qbtltorrents_sort";
+  const glyph = (asc) => asc ? " ▲" : " ▼";
+
+  // restore sort state
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(key) || "null"); } catch (e) {}
+
+  const ths = [...table.querySelectorAll("th")];
+
+  const applySort = (idx, asc) => {
+    const th = ths[idx];
     if (!th) return;
 
     const type = th.dataset.type || 'text';
+    const tbody = table.tBodies[0];
     const rows = [...tbody.querySelectorAll("tr")];
 
-    rows
-      .sort(comparer(colIdx, type, asc))
-      .forEach(tr => tbody.appendChild(tr));
+    rows.sort(comparer(idx, type, asc)).forEach(tr => tbody.appendChild(tr));
 
-    // glyphs
-    table.querySelectorAll("th").forEach(h => {
-      h.textContent = h.textContent.replace(/\s*[▲▼]\s*$/, '');
-    });
-    th.textContent = th.textContent.replace(/\s*[▲▼]\s*$/, '') + (asc ? ' ▲' : ' ▼');
+    // reset header labels + glyph
+    ths.forEach(h => { h.textContent = h.textContent.replace(/[ ▲▼]+$/, ''); });
+    th.textContent = th.textContent.replace(/[ ▲▼]+$/, '') + glyph(asc);
 
-    localStorage.setItem(key, JSON.stringify({ colIdx, asc }));
-  }
+    localStorage.setItem(key, JSON.stringify({ idx, asc }));
+  };
 
-  // restore previous sort
-  try {
-    const saved = JSON.parse(localStorage.getItem(key) || 'null');
-    if (saved && typeof saved.colIdx === 'number') {
-      applySort(saved.colIdx, !!saved.asc);
-    }
-  } catch (e) {}
-
-  [...table.querySelectorAll("th")].forEach((th, idx) => {
+  ths.forEach((th, idx) => {
+    let asc = true;
     th.style.cursor = 'pointer';
+
     th.addEventListener('click', () => {
-      let saved = null;
-      try { saved = JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) {}
-      const asc = saved && saved.colIdx === idx ? !saved.asc : true;
+      // strip any glyph first
+      th.textContent = th.textContent.replace(/[ ▲▼]+$/, '');
       applySort(idx, asc);
+      asc = !asc;
     });
   });
+
+  if (saved && typeof saved.idx === 'number') {
+    applySort(saved.idx, !!saved.asc);
+  }
 })();
 </script>

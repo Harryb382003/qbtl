@@ -24,158 +24,158 @@ use Utils qw(
     );
 
 
-sub new {
-	Logger::debug("#	new");
-    my ($class, $opts) = @_;
-    my $self = {
-        base_url => $opts->{base_url} || 'http://localhost:8080',
-        username => $opts->{username} || 'admin',
-        password => $opts->{password} || 'adminadmin',
-        ua       => LWP::UserAgent->new(cookie_jar => HTTP::Cookies->new),
-        %$opts,
-    };
-    bless $self, $class;
-    $self->_login;
-    return $self;
-}
-
-sub _login {
-	Logger::debug("#	_login");
-    my $self = shift;
-    my $res = $self->{ua}->post(
-        "$self->{base_url}/api/v2/auth/login",
-        {
-            username => $self->{username},
-            password => $self->{password}
-        }
-    );
-
-    die "Login failed: " . $res->status_line unless $res->is_success;
-}
-
-sub get_preferences {
-	Logger::debug("#	get_preferences");
-    my $self = shift;
-    my $res = $self->{ua}->get("$self->{base_url}/api/v2/app/preferences");
-
-    die "Failed to get preferences: " . $res->status_line unless $res->is_success;
-
-    return decode_json($res->decoded_content);
-}
-
-sub get_torrents_infohash {
-	Logger::debug("#	get_torrents");
-    start_timer("qBittorrent connect");
-    my $self = shift;
-    my $res = $self->{ua}->get("$self->{base_url}/api/v2/torrents/info");
-
-    die "Failed to get torrents: " . $res->status_line unless $res->is_success;
-
-    my $torrents = decode_json($res->decoded_content);
-    my %hash = map { $_->{hash} => $_ } @$torrents;
-    Logger::summary("Torrents loaded in qBittorrent     \t" . scalar(keys %hash));
-#    Logger::info("Successfully loaded into cache " . scalar(keys %hash));
-    stop_timer("qBittorrent connect");
-    return \%hash;
-}
-
-sub import_from_parsed {
-    Logger::debug("# --- IMPORTING PARSED METADATA --- #");
-    my ($self, $parsed, $opts) = @_;
-
-    my $by_infohash = $parsed->{by_infohash} || {};
-    my @pending;
-
-    for my $infohash (sort keys %$by_infohash) {
-        my $metadata = $by_infohash->{$infohash} || next;
-
-        # require: source_path, files arrayref, and at least one entry with a path
-        next unless $metadata->{source_path}
-                 && ref($metadata->{files}) eq 'ARRAY'
-                 && @{ $metadata->{files} }
-                 && defined($metadata->{files}[0]{path})
-                 && length($metadata->{files}[0]{path});
-
-        push @pending, {
-            infohash      => $infohash,
-            name          => ($metadata->{name} // '(unnamed)'),
-            source_path   => $metadata->{source_path},     # absolute .torrent path
-            files         => $metadata->{files},           # [{ path, length }, ...]
-            bucket        => $metadata->{bucket},
-            resolved_path => $metadata->{resolved_path},   # may be undef
-        };
-    }
-
-    return wantarray ? @pending : \@pending;
-}
-
-sub get_torrents_info {
-    Logger::debug("#	get_torrents_info");
-    my $self = shift;
-
-    my $res = $self->{ua}->get("$self->{base_url}/api/v2/torrents/info");
-    die "Failed to get torrents: " . $res->status_line unless $res->is_success;
-
-    my $torrents = decode_json($res->decoded_content);
-    return $torrents;   # arrayref of hashrefs
-}
-
-sub torrent_exists {
-    my ($self, $hash) = @_;
-
-    my $res = $self->{ua}->get("$self->{base_url}/api/v2/torrents/info?hashes=$hash");
-    die "Failed to check torrent: " . $res->status_line unless $res->is_success;
-
-    my $arr = decode_json($res->decoded_content);
-    return (ref($arr) eq 'ARRAY' && @$arr) ? 1 : 0;
-}
-
-sub add_torrent_file {
-  my ($self, $torrent_path, $savepath) = @_;
-
-  require HTTP::Request::Common;
-
-  my @content = (torrents => [$torrent_path]);
-
-  # THIS is the key: qBittorrent expects the field name "savepath"
-  if (defined $savepath && length $savepath) {
-    push @content, (savepath => $savepath);
-  }
-
-  my $req = HTTP::Request::Common::POST(
-    "$self->{base_url}/api/v2/torrents/add",
-    Content_Type => 'form-data',
-    Content      => \@content,
-  );
-
-  my $res = $self->{ua}->request($req);
-
-  return {
-    ok   => ($res->is_success ? 1 : 0),
-    code => ($res->code // 0),
-    body => ($res->decoded_content // ''),
-  };
-}
-
-sub recheck_hash {
-  my ($self, $hash) = @_;
-  die "bad hash" unless defined $hash && $hash =~ /^[0-9a-f]{40}$/i;
-
-  require HTTP::Request::Common;
-
-  my $req = HTTP::Request::Common::POST(
-    "$self->{base_url}/api/v2/torrents/recheck",
-    Content_Type => 'application/x-www-form-urlencoded',
-    Content      => [ hashes => $hash ],
-  );
-
-  my $res = $self->{ua}->request($req);
-
-  die "Failed to recheck: " . $res->status_line . " body=" . ($res->decoded_content // '')
-    unless $res->is_success;
-
-  return 1;
-}
+# sub new {
+# 	Logger::debug("#	new");
+#     my ($class, $opts) = @_;
+#     my $self = {
+#         base_url => $opts->{base_url} || 'http://localhost:8080',
+#         username => $opts->{username} || 'admin',
+#         password => $opts->{password} || 'adminadmin',
+#         ua       => LWP::UserAgent->new(cookie_jar => HTTP::Cookies->new),
+#         %$opts,
+#     };
+#     bless $self, $class;
+#     $self->_login;
+#     return $self;
+# }
+#
+# sub _login {
+# 	Logger::debug("#	_login");
+#     my $self = shift;
+#     my $res = $self->{ua}->post(
+#         "$self->{base_url}/api/v2/auth/login",
+#         {
+#             username => $self->{username},
+#             password => $self->{password}
+#         }
+#     );
+#
+#     die "Login failed: " . $res->status_line unless $res->is_success;
+# }
+#
+# sub get_preferences {
+# 	Logger::debug("#	get_preferences");
+#     my $self = shift;
+#     my $res = $self->{ua}->get("$self->{base_url}/api/v2/app/preferences");
+#
+#     die "Failed to get preferences: " . $res->status_line unless $res->is_success;
+#
+#     return decode_json($res->decoded_content);
+# }
+#
+# sub get_torrents_infohash {
+# 	Logger::debug("#	get_torrents");
+#     start_timer("qBittorrent connect");
+#     my $self = shift;
+#     my $res = $self->{ua}->get("$self->{base_url}/api/v2/torrents/info");
+#
+#     die "Failed to get torrents: " . $res->status_line unless $res->is_success;
+#
+#     my $torrents = decode_json($res->decoded_content);
+#     my %hash = map { $_->{hash} => $_ } @$torrents;
+#     Logger::summary("Torrents loaded in qBittorrent     \t" . scalar(keys %hash));
+# #    Logger::info("Successfully loaded into cache " . scalar(keys %hash));
+#     stop_timer("qBittorrent connect");
+#     return \%hash;
+# }
+#
+# sub import_from_parsed {
+#     Logger::debug("# --- IMPORTING PARSED METADATA --- #");
+#     my ($self, $parsed, $opts) = @_;
+#
+#     my $by_infohash = $parsed->{by_infohash} || {};
+#     my @pending;
+#
+#     for my $infohash (sort keys %$by_infohash) {
+#         my $metadata = $by_infohash->{$infohash} || next;
+#
+#         # require: source_path, files arrayref, and at least one entry with a path
+#         next unless $metadata->{source_path}
+#                  && ref($metadata->{files}) eq 'ARRAY'
+#                  && @{ $metadata->{files} }
+#                  && defined($metadata->{files}[0]{path})
+#                  && length($metadata->{files}[0]{path});
+#
+#         push @pending, {
+#             infohash      => $infohash,
+#             name          => ($metadata->{name} // '(unnamed)'),
+#             source_path   => $metadata->{source_path},     # absolute .torrent path
+#             files         => $metadata->{files},           # [{ path, length }, ...]
+#             bucket        => $metadata->{bucket},
+#             resolved_path => $metadata->{resolved_path},   # may be undef
+#         };
+#     }
+#
+#     return wantarray ? @pending : \@pending;
+# }
+#
+# sub get_torrents_info {
+#     Logger::debug("#	get_torrents_info");
+#     my $self = shift;
+#
+#     my $res = $self->{ua}->get("$self->{base_url}/api/v2/torrents/info");
+#     die "Failed to get torrents: " . $res->status_line unless $res->is_success;
+#
+#     my $torrents = decode_json($res->decoded_content);
+#     return $torrents;   # arrayref of hashrefs
+# }
+#
+# sub torrent_exists {
+#     my ($self, $hash) = @_;
+#
+#     my $res = $self->{ua}->get("$self->{base_url}/api/v2/torrents/info?hashes=$hash");
+#     die "Failed to check torrent: " . $res->status_line unless $res->is_success;
+#
+#     my $arr = decode_json($res->decoded_content);
+#     return (ref($arr) eq 'ARRAY' && @$arr) ? 1 : 0;
+# }
+#
+# sub add_torrent_file {
+#   my ($self, $torrent_path, $savepath) = @_;
+#
+#   require HTTP::Request::Common;
+#
+#   my @content = (torrents => [$torrent_path]);
+#
+#   # THIS is the key: qBittorrent expects the field name "savepath"
+#   if (defined $savepath && length $savepath) {
+#     push @content, (savepath => $savepath);
+#   }
+#
+#   my $req = HTTP::Request::Common::POST(
+#     "$self->{base_url}/api/v2/torrents/add",
+#     Content_Type => 'form-data',
+#     Content      => \@content,
+#   );
+#
+#   my $res = $self->{ua}->request($req);
+#
+#   return {
+#     ok   => ($res->is_success ? 1 : 0),
+#     code => ($res->code // 0),
+#     body => ($res->decoded_content // ''),
+#   };
+# }
+#
+# sub recheck_hash {
+#   my ($self, $hash) = @_;
+#   die "bad hash" unless defined $hash && $hash =~ /^[0-9a-f]{40}$/i;
+#
+#   require HTTP::Request::Common;
+#
+#   my $req = HTTP::Request::Common::POST(
+#     "$self->{base_url}/api/v2/torrents/recheck",
+#     Content_Type => 'application/x-www-form-urlencoded',
+#     Content      => [ hashes => $hash ],
+#   );
+#
+#   my $res = $self->{ua}->request($req);
+#
+#   die "Failed to recheck: " . $res->status_line . " body=" . ($res->decoded_content // '')
+#     unless $res->is_success;
+#
+#   return 1;
+# }
 
 
 # sub add_torrent_file_paused {

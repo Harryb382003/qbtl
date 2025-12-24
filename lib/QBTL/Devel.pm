@@ -4,304 +4,360 @@ use common::sense;
 use Mojo::IOLoop;
 use Data::Dumper;
 
-#####################################################################
-#           						DEBUGGING ROUTES
-#####################################################################
-
 sub register_routes {
-  my ($app) = @_;
+  my ($app, $opts) = @_;
+  $opts ||= {};
+
   my $r = $app->routes;
 
+  # now Devel.pm can use $opts safely
+  my $root_dir = $opts->{root_dir} || '.';
 
-  $r->post('/localcache/rebuild' => sub {
-  my $c = shift;
+#####################################################################
+  #           						DEBUGGING ROUTES
+#####################################################################
 
-  my $local_by_ih = QBTL::LocalCache::build_local_by_ih(
-    root_dir   => ($app->defaults->{root_dir} || '.'),
-    opts_local => { torrent_dir => "/" },
-  );
+  $r->post(
+        '/localcache/rebuild' => sub {
+          my $c = shift;
 
-  $c->render(json => { ok => Mojo::JSON->true, count => scalar(keys %$local_by_ih) });
-  });
+          # actually rebuild (writes the json)
+          my $local_by_ih =
+          QBTL::LocalCache::build_local_by_ih(
+                                         root_dir => ($opts->{root_dir} || '.'),
+                                         opts_local => {torrent_dir => "/"},);
 
-  $r->get('/localcache/rebuild' => sub {
-  my $c = shift;
-  return $c->render(template => 'localcache_rebuild');
-});
+          # now compute mtime from the file on disk
+          my $path =
+          QBTL::LocalCache::cache_path(root_dir => ($opts->{root_dir} || '.'));
+          my $mtime = (stat($path))[9] || time();
 
-  $r->get('/qbt/presence_check' => sub {
-  my $c = shift;
+          $c->app->defaults->{local_cache_mtime} = $mtime;
 
-  my $qbt = QBTL::QBT->new(opts => {});
-  my $list = $qbt->get_torrents_info() || [];
+          return $c->redirect_to('/');
+        });
 
-  my ($total, $with_hash, $name_is_hash) = (0, 0, 0);
-  my @sample;
+  $r->get(
+        '/localcache/rebuild' => sub {
+          my $c = shift;
+          return $c->render(template => 'localcache_rebuild');
+        });
 
-  for my $t (@$list) {
-    next if ref($t) ne 'HASH';
-    $total++;
+  $r->get(
+        '/qbt/presence_check' => sub {
+          my $c = shift;
 
-    my $h = $t->{hash} // '';
-    $with_hash++ if $h =~ /^[0-9a-fA-F]{40}$/;
+          my $qbt  = QBTL::QBT->new(opts => {});
+          my $list = $qbt->get_torrents_info() || [];
 
-    my $n = $t->{name} // '';
-    if ($n =~ /^[0-9a-fA-F]{40}$/) {
-      $name_is_hash++;
-      push @sample, { hash => $h, name => $n } if @sample < 5;
-    }
-  }
+          my ($total, $with_hash, $name_is_hash) = (0, 0, 0);
+          my @sample;
 
-  $c->render(json => {
-    total           => $total,
-    with_hash_40hex => $with_hash,
-    name_is_hash    => $name_is_hash,
-    sample          => \@sample,
-  });
-  });
+          for my $t (@$list)
+          {
+            next if ref($t) ne 'HASH';
+            $total++;
 
-	$r->post('/shutdown' => sub {
-    my $c = shift;
-      $c->render(text => "Shutting down...");
-    Mojo::IOLoop->next_tick(sub { Mojo::IOLoop->stop });
-  });
+            my $h = $t->{hash} // '';
+            $with_hash++ if $h =~ /^[0-9a-fA-F]{40}$/;
 
-	$r->get('/dev_info' => sub {
-		my $c = shift;
-		$c->render(json => { dev_mode => Mojo::JSON->true });
-	});
+            my $n = $t->{name} // '';
+            if ($n =~ /^[0-9a-fA-F]{40}$/)
+            {
+              $name_is_hash++;
+              push @sample, {hash => $h, name => $n} if @sample < 5;
+            }
+          }
 
-  $r->get('/debug_ping' => sub {
-    my $c = shift;
-    $c->render(text => "debug ok");
-  });
+          $c->render(
+                     json => {total           => $total,
+                              with_hash_40hex => $with_hash,
+                              name_is_hash    => $name_is_hash,
+                              sample          => \@sample,
+                             });
+        });
 
-  $r->post('/debug/rebuild_local_cache' => sub {
-  my $c = shift;
+  $r->post(
+        '/shutdown' => sub {
+          my $c = shift;
+          $c->render(text => "Shutting down...");
+          Mojo::IOLoop->next_tick(sub { Mojo::IOLoop->stop });
+        });
 
-  my $local_by_ih = QBTL::LocalCache::build_local_by_ih(
-    root_dir   => ($c->app->defaults->{root_dir} || '.'),
-    opts_local => { torrent_dir => "/" },
-  );
+  $r->get(
+        '/dev_info' => sub {
+          my $c = shift;
+          $c->render(json => {dev_mode => Mojo::JSON->true});
+        });
 
-  $c->render(text => "rebuilt local cache: " . scalar(keys %$local_by_ih));
-  });
+  $r->get(
+        '/debug_ping' => sub {
+          my $c = shift;
+          $c->render(text => "debug ok");
+        });
 
+  $r->post(
+        '/debug/rebuild_local_cache' => sub {
+          my $c = shift;
 
-	$r->get('/ih_debug' => sub {
-  my $c = shift;
+          my $local_by_ih =
+          QBTL::LocalCache::build_local_by_ih(
+                             root_dir => ($c->app->defaults->{root_dir} || '.'),
+                             opts_local => {torrent_dir => "/"},);
 
-  my $opts = { torrent_dir => "/" };
+          $c->render(
+                  text => "rebuilt local cache: " . scalar(keys %$local_by_ih));
+        });
 
-  my $scan = eval { QBTL::Scan::run(opts => $opts) };
-  if ($@) { return $c->render(json => { error => "scan: $@" }); }
+  $r->get(
+        '/ih_debug' => sub {
+          my $c = shift;
 
-  my $qbt_set = eval { QBTL::QBT::infohash_set(opts => $opts) };
-  if ($@) { return $c->render(json => { error => "qbt: $@" }); }
+          my $opts = {torrent_dir => "/"};
 
-  my $parsed = eval { QBTL::Parse::run(all_torrents => $scan->{torrents}, opts => $opts, qbt_loaded_tor => $qbt_set) };
-  if ($@) { return $c->render(json => { error => "parse: $@" }); }
+          my $scan = eval { QBTL::Scan::run(opts => $opts) };
+          if ($@) { return $c->render(json => {error => "scan: $@"}); }
 
-  my $local_by_ih =
-      $parsed->{by_infohash}
-   || $parsed->{infohash_map}
-   || {};
+          my $qbt_set = eval { QBTL::QBT::infohash_set(opts => $opts) };
+          if ($@) { return $c->render(json => {error => "qbt: $@"}); }
 
-  my @local_keys = ref($local_by_ih) eq 'HASH' ? keys %$local_by_ih : ();
-  my @qbt_keys   = ref($qbt_set)     eq 'HASH' ? keys %$qbt_set     : ();
+          my $parsed = eval {
+            QBTL::Parse::run(all_torrents   => $scan->{torrents},
+                             opts           => $opts,
+                             qbt_loaded_tor => $qbt_set);
+          };
+          if ($@) { return $c->render(json => {error => "parse: $@"}); }
 
-  my $is_40hex = sub {
-    my $s = shift // '';
-    $s =~ s/^\s+|\s+$//g;
-    return ($s =~ /^[0-9a-fA-F]{40}$/) ? 1 : 0;
-  };
+          my $local_by_ih =
+             $parsed->{by_infohash}
+          || $parsed->{infohash_map}
+          || {};
 
-  my $count_40hex = sub {
-    my @k = @_;
-    my $n = 0;
-    for (@k) { $n++ if $is_40hex->($_) }
-    return $n;
-  };
+          my @local_keys =
+          ref($local_by_ih) eq 'HASH' ? keys %$local_by_ih : ();
+          my @qbt_keys = ref($qbt_set) eq 'HASH' ? keys %$qbt_set : ();
 
-  my @local_sample = (sort @local_keys)[0 .. (@local_keys < 5 ? $#local_keys : 4)];
-  my @qbt_sample   = (sort @qbt_keys)[0   .. (@qbt_keys   < 5 ? $#qbt_keys   : 4)];
+          my $is_40hex = sub {
+            my $s = shift // '';
+            $s =~ s/^\s+|\s+$//g;
+            return ($s =~ /^[0-9a-fA-F]{40}$/) ? 1 : 0;
+          };
 
-  $c->render(json => {
-    local_key_count     => scalar(@local_keys),
-    qbt_key_count       => scalar(@qbt_keys),
-    local_40hex_count   => $count_40hex->(@local_keys),
-    qbt_40hex_count     => $count_40hex->(@qbt_keys),
-    local_sample_keys   => \@local_sample,
-    qbt_sample_keys     => \@qbt_sample,
-  });
-  });
+          my $count_40hex = sub {
+            my @k = @_;
+            my $n = 0;
+            for (@k) { $n++ if $is_40hex->($_) }
+            return $n;
+          };
 
-  $r->get('/overlap_debug' => sub {
-  my $c = shift;
+          my @local_sample =
+          (sort @local_keys)[0 .. (@local_keys < 5 ? $#local_keys : 4)];
+          my @qbt_sample =
+          (sort @qbt_keys)[0 .. (@qbt_keys < 5 ? $#qbt_keys : 4)];
 
-  my $opts = { torrent_dir => "/" };  # temporary
+          $c->render(
+                     json => {local_key_count   => scalar(@local_keys),
+                              qbt_key_count     => scalar(@qbt_keys),
+                              local_40hex_count => $count_40hex->(@local_keys),
+                              qbt_40hex_count   => $count_40hex->(@qbt_keys),
+                              local_sample_keys => \@local_sample,
+                              qbt_sample_keys   => \@qbt_sample,
+                             });
+        });
 
-  my $scan = eval { QBTL::Scan::run(opts => $opts) };
-  if ($@) { return $c->render(json => { error => "scan: $@" }); }
+  $r->get(
+        '/overlap_debug' => sub {
+          my $c = shift;
 
-  my $qbt_set = eval { QBTL::QBT::infohash_set(opts => $opts) };
-  if ($@) { return $c->render(json => { error => "qbt: $@" }); }
+          my $opts = {torrent_dir => "/"};    # temporary
 
-  my $parsed = eval { QBTL::Parse::run(all_torrents => $scan->{torrents}, opts => $opts, qbt_loaded_tor => $qbt_set) };
-  if ($@) { return $c->render(json => { error => "parse: $@" }); }
+          my $scan = eval { QBTL::Scan::run(opts => $opts) };
+          if ($@) { return $c->render(json => {error => "scan: $@"}); }
 
-  my $local_by_ih = $parsed->{by_infohash} || $parsed->{infohash_map} || {};
-  my @hits;
+          my $qbt_set = eval { QBTL::QBT::infohash_set(opts => $opts) };
+          if ($@) { return $c->render(json => {error => "qbt: $@"}); }
 
-  if (ref($local_by_ih) eq 'HASH' && ref($qbt_set) eq 'HASH') {
-    for my $ih (keys %$local_by_ih) {
-      if (exists $qbt_set->{$ih}) {
-        push @hits, $ih;
-        last if @hits >= 10;
-      }
-    }
-  }
+          my $parsed = eval {
+            QBTL::Parse::run(all_torrents   => $scan->{torrents},
+                             opts           => $opts,
+                             qbt_loaded_tor => $qbt_set);
+          };
+          if ($@) { return $c->render(json => {error => "parse: $@"}); }
 
-  $c->render(json => {
-    local_count   => (ref($local_by_ih) eq 'HASH' ? scalar(keys %$local_by_ih) : 0),
-    qbt_count     => (ref($qbt_set) eq 'HASH' ? scalar(keys %$qbt_set) : 0),
-    overlap_found => scalar(@hits),
-    overlap_sample => \@hits,
-  });
-  });
+          my $local_by_ih =
+          $parsed->{by_infohash} || $parsed->{infohash_map} || {};
+          my @hits;
 
+          if (ref($local_by_ih) eq 'HASH' && ref($qbt_set) eq 'HASH')
+          {
+            for my $ih (keys %$local_by_ih)
+            {
+              if (exists $qbt_set->{$ih})
+              {
+                push @hits, $ih;
+                last if @hits >= 10;
+              }
+            }
+          }
 
-  $r->get('/sample_local' => sub {
-  my $c = shift;
+          $c->render(
+                 json => {
+                   local_count => (
+                    ref($local_by_ih) eq 'HASH' ? scalar(keys %$local_by_ih) : 0
+                   ),
+                   qbt_count =>
+                   (ref($qbt_set) eq 'HASH' ? scalar(keys %$qbt_set) : 0),
+                   overlap_found  => scalar(@hits),
+                   overlap_sample => \@hits,
+                 });
+        });
 
-  my $opts = { torrent_dir => "/" };  # temporary
+  $r->get(
+        '/sample_local' => sub {
+          my $c = shift;
 
-  my $scan = eval { QBTL::Scan::run(opts => $opts) };
-  if ($@) { return $c->render(json => { error => "scan: $@" }); }
+          my $opts = {torrent_dir => "/"};    # temporary
 
-  my $parsed = eval { QBTL::Parse::run(all_torrents => $scan->{torrents}, opts => $opts) };
-  if ($@) { return $c->render(json => { error => "parse: $@" }); }
+          my $scan = eval { QBTL::Scan::run(opts => $opts) };
+          if ($@) { return $c->render(json => {error => "scan: $@"}); }
 
-  my $local_by_ih = $parsed->{by_infohash} || $parsed->{infohash_map} || {};
-  if (ref($local_by_ih) ne 'HASH' || !keys %$local_by_ih) {
-    return $c->render(json => { error => "no local infohash map found" });
-  }
+          my $parsed = eval {
+            QBTL::Parse::run(all_torrents => $scan->{torrents},
+                             opts         => $opts);
+          };
+          if ($@) { return $c->render(json => {error => "parse: $@"}); }
 
-  my @ih = sort keys %$local_by_ih;
-  my @pick;
-  for my $i (0..19) {
-    last if $i > $#ih;
-    my $h = $ih[$i];
-    my $v = $local_by_ih->{$h};
+          my $local_by_ih =
+          $parsed->{by_infohash} || $parsed->{infohash_map} || {};
+          if (ref($local_by_ih) ne 'HASH' || !keys %$local_by_ih)
+          {
+            return $c->render(json => {error => "no local infohash map found"});
+          }
 
-    # value might be a path string OR a richer structure; handle both
-#     my $path =
-#         !ref($v) ? $v
-#       : ref($v) eq 'HASH' ? ($v->{path} || $v->{torrent_path} || $v->{file} || '')
-#       : '';
-    my $path = ref($v) eq 'HASH' ? $v->{source_path} : '';
+          my @ih = sort keys %$local_by_ih;
+          my @pick;
+          for my $i (0 .. 19)
+          {
+            last if $i > $#ih;
+            my $h = $ih[$i];
+            my $v = $local_by_ih->{$h};
 
-    push @pick, { infohash => $h, path => $path };
-  }
+            # value might be a path string OR a richer structure; handle both
+            #     my $path =
+            #         !ref($v) ? $v
+            #       : ref($v) eq 'HASH' ? ($v->{path} || $v->{torrent_path} || $v->{file} || '')
+            #       : '';
+            my $path = ref($v) eq 'HASH' ? $v->{source_path} : '';
 
-  $c->render(json => { sample => \@pick });
-  });
+            push @pick, {infohash => $h, path => $path};
+          }
 
+          $c->render(json => {sample => \@pick});
+        });
 
-  $r->get('/local_entry' => sub {
-  my $c  = shift;
-  my $ih = $c->param('ih') // '';
+  $r->get(
+        '/local_entry' => sub {
+          my $c  = shift;
+          my $ih = $c->param('ih') // '';
 
-  my $opts = { torrent_dir => "/" };
+          my $opts = {torrent_dir => "/"};
 
-  my $scan = QBTL::Scan::run(opts => $opts);
-  my $parsed = QBTL::Parse::run(
-    all_torrents => $scan->{torrents},
-    opts         => $opts,
-  );
+          my $scan = QBTL::Scan::run(opts => $opts);
+          my $parsed = QBTL::Parse::run(all_torrents => $scan->{torrents},
+                                        opts         => $opts,);
 
-  my $local_by_ih = $parsed->{by_infohash}
-                 || $parsed->{infohash_map}
-                 || {};
+          my $local_by_ih =
+             $parsed->{by_infohash}
+          || $parsed->{infohash_map}
+          || {};
 
-  my $v = $local_by_ih->{$ih};
+          my $v = $local_by_ih->{$ih};
 
-  $c->render(json => {
-    infohash => $ih,
-    ref_type => (defined $v ? ref($v) : 'undef'),
-    dumped   => Dumper($v),
-  });
-  });
+          $c->render(
+                     json => {infohash => $ih,
+                              ref_type => (defined $v ? ref($v) : 'undef'),
+                              dumped   => Dumper($v),
+                             });
+        });
 
-  $r->get('/qbt_name_is_hash' => sub {
-  my $c = shift;
+  $r->get(
+        '/qbt_name_is_hash' => sub {
+          my $c = shift;
 
-  my $opts = {};  # later: load config.json like legacy did
+          my $opts = {};    # later: load config.json like legacy did
 
-  my $qbt = eval { QBTL::QBT->new(opts => $opts) };
-  if ($@) { return $c->render(json => { error => "QBTL::QBT->new: $@" }); }
+          my $qbt = eval { QBTL::QBT->new(opts => $opts) };
+          if ($@)
+          {
+            return $c->render(json => {error => "QBTL::QBT->new: $@"});
+          }
 
-  # Try to get full torrent list from the legacy module.
-#   my $list = eval {
-#     if ($qbt->can('get_torrents')) {
-#       return $qbt->get_torrents();                 # guessed
-#     } elsif ($qbt->can('torrents_info')) {
-#       return $qbt->torrents_info();                # guessed
-#     } elsif ($qbt->can('get_torrents_list')) {
-#       return $qbt->get_torrents_list();            # guessed
-#     } else {
-#       die "No method found to fetch torrent list (tried get_torrents/torrents_info/get_torrents_list)";
-#     }
-#   };
-#   if ($@) { return $c->render(json => { error => "fetch list: $@" }); }
+          # Try to get full torrent list from the legacy module.
+          #   my $list = eval {
+          #     if ($qbt->can('get_torrents')) {
+          #       return $qbt->get_torrents();                 # guessed
+          #     } elsif ($qbt->can('torrents_info')) {
+          #       return $qbt->torrents_info();                # guessed
+          #     } elsif ($qbt->can('get_torrents_list')) {
+          #       return $qbt->get_torrents_list();            # guessed
+          #     } else {
+          #       die "No method found to fetch torrent list (tried get_torrents/torrents_info/get_torrents_list)";
+          #     }
+          #   };
+          #   if ($@) { return $c->render(json => { error => "fetch list: $@" }); }
 
-  my $list = eval { $qbt->get_torrents_info() };
-  if ($@) {
-    return $c->render(json => { error => "fetch list: $@" });
-  }
+          my $list = eval { $qbt->get_torrents_info() };
+          if ($@)
+          {
+            return $c->render(json => {error => "fetch list: $@"});
+          }
 
-  $list = [] if ref($list) ne 'ARRAY';
+          $list = [] if ref($list) ne 'ARRAY';
 
-  my @hits;
-  for my $t (@$list) {
-    next if ref($t) ne 'HASH';
-    my $name = $t->{name} // '';
-    my $hash = $t->{hash} // $t->{infohash} // '';
-    my $progress = $t->{progress} // -1;
-    next unless $name =~ /^[0-9a-fA-F]{40}$/;     # name *is* 40-hex
-    push @hits, {
-      name => $name,
-      hash => $hash,
-      save_path => ($t->{save_path} // ''),
-      state => ($t->{state} // ''),
-      progress  => $progress,
-    };
-    last if @hits >= 50;
-  }
+          my @hits;
+          for my $t (@$list)
+          {
+            next if ref($t) ne 'HASH';
+            my $name     = $t->{name}     // '';
+            my $hash     = $t->{hash}     // $t->{infohash} // '';
+            my $progress = $t->{progress} // -1;
+            next unless $name =~ /^[0-9a-fA-F]{40}$/;    # name *is* 40-hex
+            push @hits,
+            {name      => $name,
+             hash      => $hash,
+             save_path => ($t->{save_path} // ''),
+             state     => ($t->{state}     // ''),
+             progress  => $progress,};
+            last if @hits >= 50;
+          }
 
-  my $zero = 0;
-  $zero++ for grep { ($_->{progress} // -1) == 0 } @hits;
-    $c->render(json => {
-      found => scalar(@hits),
-      found_progress_zero => $zero,
-      sample => \@hits,
-    });
-  });
+          my $zero = 0;
+          $zero++ for grep { ($_->{progress} // -1) == 0 } @hits;
+          $c->render(
+                     json => {found               => scalar(@hits),
+                              found_progress_zero => $zero,
+                              sample              => \@hits,
+                             });
+        });
 
-  $r->post('/restart' => sub {
-    my $c = shift;
-    return $c->render(text => "dev-mode required", status => 403)
-    unless $c->app->defaults->{dev_mode};
-  # Render the page NOW (so the browser definitely receives HTML)
-    $c->stash(notice => "Restarting server…");
-    $c->render(template => 'restart');
-  # Then restart shortly after the response is on the wire
-    my $app = $c->app;
-    Mojo::IOLoop->timer(0.15 => sub {
-      $app->log->debug("[devel] restart requested -> exiting 42");
-      CORE::exit(42);   # qbtl-run.pl restarts on 42
-    });
-  });
+  $r->post(
+        '/restart' => sub {
+          my $c = shift;
+          return $c->render(text => "dev-mode required", status => 403)
+          unless $c->app->defaults->{dev_mode};
+
+          # Render the page NOW (so the browser definitely receives HTML)
+          $c->stash(notice => "Restarting server…");
+          $c->render(template => 'restart');
+
+          # Then restart shortly after the response is on the wire
+          my $app = $c->app;
+          Mojo::IOLoop->timer(
+            0.15 => sub {
+              $app->log->debug("[devel] restart requested -> exiting 42");
+              CORE::exit(42);    # qbtl-run.pl restarts on 42
+            });
+        });
 
   return;
 }

@@ -2,6 +2,12 @@
 % title 'Rebuild local cache';
 
 <h1>Rebuild local cache</h1>
-<form method="post" action="/localcache/rebuild">
-  <button type="submit">Rebuild now</button>
+% my $ts = stash('local_cache_mtime') || 0;
+% my $pretty = $ts ? scalar(localtime($ts)) : 'never';
+
+<form method="post" action="/cache/rebuild">
+  <button type="submit">
+    Rebuild Cache<br>
+    <small>Last: <%= $pretty %></small>
+  </button>
 </form>
