@@ -13,6 +13,118 @@ use QBTL::Plan;
 use QBTL::QBT;
 use QBTL::Scan;
 
+sub _add_one_state {
+  my ($app) = @_;
+  $app->defaults->{add_one} ||= {
+         queue => [],         # arrayref of infohashes
+         idx   => 0,          # current cursor
+         meta  => {}
+         ,    # { ih => { failed_once => 1, last_error => "...", ts => epoch } }
+         cache_mtime => 0,    # mtime used when queue was built
+                                };
+  return $app->defaults->{add_one};
+}
+
+sub _shuffle_in_place {
+  my ($a) = @_;
+  return $a unless ref($a) eq 'ARRAY';
+  for (my $i = @$a - 1 ; $i > 0 ; $i--)
+  {
+    my $j = int(rand($i + 1));
+    next if $i == $j;
+    @$a[$i, $j] = @$a[$j, $i];
+  }
+  return $a;
+}
+
+sub _add_one_build_queue {
+  my (%args)      = @_;
+  my $app         = $args{app};
+  my $local_by_ih = $args{local_by_ih} || {};
+  my $qbt_by_ih   = $args{qbt_by_ih}   || {};
+  my $cache_mtime = $args{cache_mtime} || 0;
+
+  my $st = _add_one_state($app);
+
+  my @missing =
+      grep { !exists $qbt_by_ih->{$_} }
+      grep { defined($_) && $_ =~ /^[0-9a-f]{40}$/ }
+      keys %$local_by_ih;
+
+  _shuffle_in_place(\@missing);
+
+  $st->{queue}       = \@missing;
+  $st->{idx}         = 0;
+  $st->{cache_mtime} = $cache_mtime || 0;
+
+  # NOTE: keep $st->{meta} (failure history) across rebuilds unless you prefer to clear it.
+  return $st->{queue};
+}
+
+sub _add_one_advance {
+  my ($app) = @_;
+  my $st    = _add_one_state($app);
+  my $n     = scalar(@{$st->{queue} || []});
+  return undef if !$n;
+
+  $st->{idx}++;
+  $st->{idx} = 0 if $st->{idx} >= $n;
+
+  return $st->{queue}[$st->{idx}];
+}
+
+sub _add_one_current {
+  my ($app) = @_;
+  my $st    = _add_one_state($app);
+  my $q     = $st->{queue} || [];
+  return undef unless @$q;
+
+  my $i = $st->{idx} || 0;
+  $i         = 0 if $i < 0;
+  $i         = 0 if $i > $#$q;
+  $st->{idx} = $i;
+
+  return $q->[$i];
+}
+
+sub _add_one_remove_hash {
+  my ($app, $ih) = @_;
+  $ih = lc($ih // '');
+  return unless $ih =~ /^[0-9a-f]{40}$/;
+
+  my $st = _add_one_state($app);
+  my $q  = $st->{queue} || [];
+
+  for (my $i = 0 ; $i < @$q ; $i++)
+  {
+    next unless defined $q->[$i];
+    next unless lc($q->[$i]) eq $ih;
+
+    splice(@$q, $i, 1);
+
+    # keep idx valid
+    $st->{idx} = 0 if $st->{idx} >= @$q;
+    last;
+  }
+
+  $st->{queue} = $q;
+  return;
+}
+
+sub _add_one_mark_fail {
+  my ($app, $ih, $err) = @_;
+  $ih = lc($ih // '');
+  return unless $ih =~ /^[0-9a-f]{40}$/;
+
+  my $st = _add_one_state($app);
+  $st->{meta}{$ih} ||= {};
+  $st->{meta}{$ih}{failed_once} = 1;
+  $st->{meta}{$ih}{last_error}  = (defined $err ? $err : '');
+  $st->{meta}{$ih}{ts}          = time;
+
+  return;
+}
+
 sub _fmt_ts {
   my ($epoch) = @_;
   return '' unless $epoch;
@@ -119,13 +231,9 @@ sub _task_fail_items {
     push @fails, $t;
   }
 
-  # newest first
   @fails = sort { ($b->{ts} || 0) <=> ($a->{ts} || 0) } @fails;
 
-  if (@fails > $limit)
-  {
-    @fails = @fails[0 .. ($limit - 1)];
-  }
+  @fails = @fails[0 .. ($limit - 1)] if @fails > $limit;
   return \@fails;
 }
 
@@ -136,7 +244,8 @@ sub _qbt_observer_tick {
   my $tasks = _tasks_ref($app);
   $app->defaults->{observer_last_tick}  = time;
   $app->defaults->{observer_last_count} = scalar(keys %$tasks);
-  return unless %$tasks;    # nothing to do
+  return unless %$tasks;
+
   $app->log->debug("[observer] tick: tasks=" . scalar(keys %$tasks));
 
   my $qbt;
@@ -147,8 +256,6 @@ sub _qbt_observer_tick {
       {
         my $err = "$@";
         chomp $err;
-
-        # mark global failure on all tasks (light-touch)
         for my $hash (keys %$tasks)
         {
           my $t = $tasks->{$hash};
@@ -176,7 +283,6 @@ sub _qbt_observer_tick {
       next;
     }
 
-    # missing in qBittorrent == "new"
     if (!ref($arr) || ref($arr) ne 'ARRAY' || !@$arr)
     {
       my $t = ($tasks->{$hash} ||= {hash => $hash});
@@ -200,26 +306,56 @@ sub _qbt_observer_tick {
       next;
     }
 
-    # conservative: progress > 0 means “known good location”
     if (defined $progress && $progress > 0)
     {
-      $t->{stage} = 'ready';    # ready-to-resume (action later)
+      $t->{stage} = 'ready';
       next;
     }
 
-    # otherwise it’s still suspect
     $t->{stage} = 'suspect_zero';
   }
 
   return;
 }
 
+sub _qbt_snapshot {
+  my ($app, $opts, $force) = @_;
+  $opts  ||= {};
+  $force ||= 0;
+
+  my $ts = $app->defaults->{qbt_ts} || 0;
+
+  # choose your freshness window; 2s is plenty for UI clicks
+  my $fresh_for = 2;
+
+  if (!$force && $ts && (time - $ts) <= $fresh_for)
+  {
+    return ($app->defaults->{qbt_list} || [],
+            $app->defaults->{qbt_by_ih} || {});
+  }
+
+  my $qbt  = QBTL::QBT->new(opts => $opts);
+  my $list = $qbt->get_torrents_info() || [];
+
+  my %by;
+  for my $t (@$list)
+  {
+    next if ref($t) ne 'HASH';
+    my $h = $t->{hash} // '';
+    next unless $h =~ /^[0-9a-fA-F]{40}$/;
+    $by{lc($h)} = $t;
+  }
+
+  $app->defaults->{qbt_list}  = $list;
+  $app->defaults->{qbt_by_ih} = \%by;
+  $app->defaults->{qbt_ts}    = time;
+
+  return ($list, \%by);
+}
+
 sub _infohash_from_torrent_file {
   my ($path) = @_;
-
-  # Minimal bencode extract: get the raw "info" dictionary bytes and SHA1 them.
-  # If you already have a torrent parser/bencode module in your legacy code, use that instead.
-  require Bencode;    # if you have it
+  require Bencode;
   my $raw = do
       {
         open my $fh, '<:raw', $path or die "open($path): $!";
@@ -250,32 +386,40 @@ sub _task_upsert {
 sub app {
   my ($opts) = @_;
   $opts ||= {};
+
   my $app = Mojolicious->new;
   $app->defaults->{dev_mode} = ($opts->{dev_mode} ? 1 : 0);
-  $app->defaults->{root_dir} = $opts->{root_dir} || '.';
 
   my $root = $opts->{root_dir} || '.';
   $app->defaults->{root_dir} = $root;
 
-  # cache mtime survives restart
-  my $cache = QBTL::LocalCache::cache_path(root_dir => $root);
-  $app->defaults->{local_cache_mtime} =
-      (-e $cache) ? ((stat($cache))[9] || 0) : 0;
+  # Defaults for cache metadata
+  $app->defaults->{local_cache_mtime} = 0;
+  $app->defaults->{local_cache_src}   = '';
+
   push @{$app->renderer->paths}, File::Spec->catdir($root, 'templates');
   push @{$app->static->paths},   File::Spec->catdir($root, 'ui');
 
+  # Keep cache stamp fresh (prefer .stor else .json)
   $app->hook(
         before_dispatch => sub {
-          my $c = shift;
+          my $c    = shift;
+          my $root = $c->app->defaults->{root_dir} || '.';
 
-          my $root  = $c->app->defaults->{root_dir} || '.';
-          my $cache = QBTL::LocalCache::cache_path(root_dir => $root);
+          my $bin  = QBTL::LocalCache::cache_path_bin(root_dir => $root);
+          my $json = QBTL::LocalCache::cache_path_json(root_dir => $root);
 
-          my $ts = (-e $cache) ? ((stat($cache))[9] || 0) : 0;
+          my ($ts, $src) =
+            -e $bin  ? ((stat($bin))[9]  || 0, 'bin')
+          : -e $json ? ((stat($json))[9] || 0, 'json')
+          :            (0, '');
+
           $c->app->defaults->{local_cache_mtime} = $ts;
+          $c->app->defaults->{local_cache_src}   = $src;
 
           $c->stash(
                   local_cache_mtime => $ts,
+                  local_cache_src   => $src,
                   local_cache_label => ($ts ? scalar(localtime($ts)) : 'never'),
           );
         });
@@ -285,10 +429,11 @@ sub app {
   push @{$app->static->paths}, $ui_dir;
 
   my $r = $app->routes;
+
   if ($opts->{dev_mode})
   {
     require QBTL::Devel;
-    QBTL::Devel::register_routes($app);
+    QBTL::Devel::register_routes($app, $opts);    # <-- IMPORTANT
     $app->log->debug("QBTL::Devel routes registered");
   }
 
@@ -298,11 +443,13 @@ sub app {
           $c->stash(dev_mode => ($opts->{dev_mode} ? 1 : 0));
 
           # ---------- Load local cache ----------
-          my $local_by_ih =
+          my ($local_by_ih, $mtime, $src) =
           QBTL::LocalCache::get_local_by_ih(
                                          root_dir => ($opts->{root_dir} || '.'),
                                          opts_local => {torrent_dir => "/"},);
           $local_by_ih = {} if ref($local_by_ih) ne 'HASH';
+          $c->stash(local_cache_mtime => ($mtime || 0));
+          $c->stash(local_cache_src   => ($src   || ''));
 
           my $local_count = scalar(keys %$local_by_ih);
 
@@ -311,9 +458,9 @@ sub app {
           my $qbt_err = '';
           eval {
             my $qbt = QBTL::QBT->new(opts => {});
-            $qbt_by_ih = $qbt->get_torrents_infohash();      # { hash => {...} }
+            $qbt_by_ih = $qbt->get_torrents_infohash();
             $qbt_by_ih = {} if ref($qbt_by_ih) ne 'HASH';
-            $qbt_list  = $qbt->get_torrents_info() || [];    # [ {...}, ... ]
+            $qbt_list  = $qbt->get_torrents_info() || [];
             1;
           } or do
           {
@@ -324,7 +471,6 @@ sub app {
 
           my $qbt_loaded_count = scalar(keys %$qbt_by_ih);
 
-          # ---------- Compute qbt name-as-hash + repairable ----------
           my $name_is_hash = 0;
           my $repairable   = 0;
 
@@ -340,14 +486,12 @@ sub app {
             $repairable++ if exists $local_by_ih->{$ih};
           }
 
-          # ---------- Missing-from-qbt (local not loaded) ----------
           my $missing_from_qbt = 0;
           for my $ih (keys %$local_by_ih)
           {
             $missing_from_qbt++ if !exists $qbt_by_ih->{$ih};
           }
 
-          # ---------- Runtime counts + failures list ----------
           my %stage_counts;
           my @fails;
 
@@ -357,9 +501,7 @@ sub app {
             next if ref($rec) ne 'HASH';
 
             my $rt = $rec->{runtime};
-            next
-            if ref($rt) ne
-            'HASH';    # only runtime-tracked items count toward stages
+            next if ref($rt) ne 'HASH';
 
             my $stage = $rt->{stage} // 'unknown';
             $stage_counts{$stage}++;
@@ -378,10 +520,8 @@ sub app {
              source_path => ($rec->{source_path} // ''),};
           }
 
-          # newest failures first
           @fails = sort { ($b->{ts} || 0) <=> ($a->{ts} || 0) } @fails;
 
-          # Tiny helper: format epoch -> local time
           my $fmt_ts = sub {
             my ($ts) = @_;
             return '' unless $ts;
@@ -399,6 +539,7 @@ sub app {
                        missing_from_qbt => $missing_from_qbt,
                        repairable       => $repairable,
                        qbt_error        => $qbt_err,);
+
           my $tick = $app->defaults->{observer_last_tick} || 0;
 
           $c->stash(
@@ -410,13 +551,6 @@ sub app {
             observer_last_tick_h => _fmt_ts($tick),
             observer_last_count => ($app->defaults->{observer_last_count} || 0),
           );
-
-          #           if ($opts->{dev_mode})
-          #           {
-          #             require QBTL::Devel;
-          #             QBTL::Devel::register_routes($app);
-          #             $app->log->debug("QBTL::Devel routes registered");
-          #           }
 
           $c->render(template => 'index');
         });
@@ -450,79 +584,10 @@ sub app {
 
   $r->get(
         '/parse_smoke' => sub {
-          my $c = shift;
-
-          # Minimal opts + empty torrent list for smoke test
+          my $c   = shift;
           my $res = eval { QBTL::Parse::run(all_torrents => [], opts => {}) };
-          if ($@)
-          {
-            return $c->render(json => {error => "$@"});
-          }
+          return $c->render(json => {error => "$@"}) if $@;
           $c->render(json => {ok => Mojo::JSON->true});
-        });
-
-  $r->get(
-        '/plan_preview' => sub {
-          my $c = shift;
-
-          my $opts =
-          {torrent_dir => "/"};   # temporary; we’ll make this configurable next
-
-          my $scan = eval { QBTL::Scan::run(opts => $opts) };
-          if ($@)
-          {
-            return $c->render(json => {error => "scan: $@"});
-          }
-
-          my $qbt_by_ih = eval {
-            my $qbt = QBTL::QBT->new(opts => $opts);
-            my $h   = $qbt->get_torrents_infohash();    # { infohash => {...} }
-            $h = {} if ref($h) ne 'HASH';
-            $h;
-          };
-          if ($@)
-          {
-            return $c->render(json => {error => "qbt: $@"});
-          }
-
-          # Build local ih => path map using parser
-          my $parsed = eval {
-            QBTL::Parse::run(
-                all_torrents   => $scan->{torrents},
-                opts           => $opts,
-                qbt_loaded_tor => $qbt_by_ih,          # <-- FIX 1: was $qbt_set
-                            );
-          };
-          if ($@)
-          {
-            return $c->render(json => {error => "parse: $@"});
-          }
-
-          my $local_by_ih =
-          $parsed->{by_infohash} || $parsed->{infohash_map} || {};
-          if (ref($local_by_ih) ne 'HASH' || !keys %$local_by_ih)
-          {
-            return
-            $c->render(
-              json => {
-                error =>
-                "No local infohash map found in parsed data (expected by_infohash/infohash_map).",
-                keys_seen => [grep { defined } keys %$parsed],
-              });
-          }
-
-          my $plan = QBTL::Plan::missing_infohashes(
-                        local_by_ih => $local_by_ih,
-                        qbt_set     => $qbt_by_ih,     # <-- FIX 2: was $qbt_set
-                                                   );
-
-          $c->render(
-                     json => {local_unique_infohashes => $plan->{local_count},
-                              qbt_loaded_count        => $plan->{qbt_count},
-                              overlap_count           => $plan->{overlap},
-                              missing_count  => scalar(@{$plan->{missing}}),
-                              sample_overlap => undef,
-                             });
         });
 
   $r->get(
@@ -536,33 +601,50 @@ sub app {
           my $c = shift;
           $c->stash(dev_mode => ($opts->{dev_mode} ? 1 : 0));
 
-          my $local_by_ih =
+          my ($local_by_ih, $cache_mtime, $cache_src) =
           QBTL::LocalCache::get_local_by_ih(
                                          root_dir => ($opts->{root_dir} || '.'),
                                          opts_local => {torrent_dir => "/"},);
           $local_by_ih = {} if ref($local_by_ih) ne 'HASH';
 
+          # Pull qbt snapshot ONLY when we need to (queue build / rebuild)
           my $qbt       = QBTL::QBT->new(opts => {});
           my $qbt_by_ih = $qbt->get_torrents_infohash;
           $qbt_by_ih = {} if ref($qbt_by_ih) ne 'HASH';
 
-          # Optional: allow user to request a specific hash (?hash=...)
+          my $st = _add_one_state($c->app);
+
+          # Rebuild queue if empty OR cache has changed since queue build
+          if (!@{$st->{queue} || []}
+              || (($st->{cache_mtime} || 0) != ($cache_mtime || 0)))
+          {
+            _add_one_build_queue(app         => $c->app,
+                                 local_by_ih => $local_by_ih,
+                                 qbt_by_ih   => $qbt_by_ih,
+                                 cache_mtime => ($cache_mtime || 0),);
+          }
+
+          # Explicit "next" click?
+          my $next = $c->param('next') // '';
+          if ($next)
+          {
+            _add_one_advance($c->app);
+          }
+
+          # Optional explicit hash (?hash=...)
           my $want_hash = $c->param('hash') // '';
           $want_hash =~ s/\s+//g;
-
-          # Validate hex shape only (case-insensitive)
           $want_hash = '' unless $want_hash =~ /^[0-9a-fA-F]{40}$/;
 
           my $pick_hash;
 
           if ($want_hash)
           {
-            my $want_lc = lc $want_hash;
+            my $want_lc = lc($want_hash);
 
-            # Find the exact local key (preserve whatever casing local_by_ih uses)
+            # Preserve original casing from local_by_ih keys (even though you usually store lc)
             ($pick_hash) = grep { lc($_) eq $want_lc } keys %$local_by_ih;
 
-            # If they asked for a hash that isn't local, show an error (don’t silently fall back)
             if (!$pick_hash)
             {
               return
@@ -572,8 +654,7 @@ sub app {
               );
             }
 
-            # If it's already in qBittorrent, tell them (again: don’t silently fall back)
-            if (exists $qbt_by_ih->{$pick_hash})
+            if (exists $qbt_by_ih->{lc($pick_hash)})
             {
               return
               $c->render(
@@ -585,16 +666,14 @@ sub app {
           }
           else
           {
-            # Default behavior: pick first local hash not in qBittorrent
-            ($pick_hash) = grep { !exists $qbt_by_ih->{$_} } keys %$local_by_ih;
+            $pick_hash = _add_one_current($c->app);
           }
 
-          if (!$pick_hash)
-          {
-            return $c->render(template => 'qbt_add_one');
-          }
+          return $c->render(template => 'qbt_add_one') unless $pick_hash;
 
-          my $rec = $local_by_ih->{$pick_hash};
+          my $ih_lc = lc($pick_hash);
+
+          my $rec = $local_by_ih->{$pick_hash} || $local_by_ih->{$ih_lc};
           my $source_path =
           (ref($rec) eq 'HASH') ? ($rec->{source_path} // '') : '';
 
@@ -606,8 +685,16 @@ sub app {
                       );
           }
 
+          my $meta = _add_one_state($c->app)->{meta}{$ih_lc} || {};
+
           $c->stash(
-                  picked => {hash => $pick_hash, source_path => $source_path,});
+            picked       => {hash => $ih_lc, source_path => $source_path},
+            add_one_meta => $meta,
+
+            # handy for UI/debug
+            add_one_queue_n =>
+            scalar(@{_add_one_state($c->app)->{queue} || []}),
+            add_one_idx => (_add_one_state($c->app)->{idx} || 0) + 1,);
 
           return $c->render(template => 'qbt_add_one');
         });
@@ -619,6 +706,7 @@ sub app {
 
           my $hash = $c->param('hash') // '';
           $hash =~ s/\s+//g;
+          $hash = lc $hash;
 
           my $source_path = $c->param('source_path') // '';
 
@@ -626,18 +714,9 @@ sub app {
           $c->render(template => 'qbt_add_one',
                      error    => "bad hash",
                      picked   => {hash => $hash, source_path => $source_path},)
-          unless $hash =~ /^[0-9a-fA-F]{40}$/;
-          my $confirm = $c->param('confirm') // '';
+          unless $hash =~ /^[0-9a-f]{40}$/;
 
-          # --- Basic validation ---
-          if ($hash !~ /^[0-9a-f]{40}$/)
-          {
-            return
-            $c->render(template => 'qbt_add_one',
-                       error    => "bad hash",
-                       picked   => {hash => $hash, source_path => $source_path},
-                      );
-          }
+          my $confirm = $c->param('confirm') // '';
           if (!$confirm)
           {
             return
@@ -657,7 +736,33 @@ sub app {
 
           my $qbt = QBTL::QBT->new(opts => {});
 
-          # --- Preflight debug ---
+          # --- Pre-check: already exists in qBittorrent? (stale cache / already added) ---
+          my $exists = eval { $qbt->torrent_exists(lc($hash)) };
+          if ($@)
+          {
+            my $err = "$@";
+            chomp $err;
+            return
+            $c->render(template => 'qbt_add_one',
+                       error    => "torrent_exists check failed: $err",
+                       picked   => {hash => $hash, source_path => $source_path},
+                      );
+          }
+
+          if ($exists)
+          {
+            # Treat as "success" from the POV of local queue: it's already there.
+            _add_one_remove_hash($c->app, $hash);
+
+            my $msg =
+            "Already exists in qBittorrent (stale cache or previously added): $hash";
+            return
+            $c->render(template => 'qbt_add_one',
+                       error    => $msg,
+                       picked   => {hash => $hash, source_path => $source_path},
+                      );
+          }
+
           my $sz      = (-e $source_path) ? (-s $source_path) : 0;
           my $ih_file = eval { _infohash_from_torrent_file($source_path) };
           $ih_file = $@ ? "(ih parse failed: $@)" : $ih_file;
@@ -668,8 +773,7 @@ sub app {
 
           require QBTL::SavePath;
 
-          # --- Local cache needed to derive savepath ---
-          my $local_by_ih =
+          my ($local_by_ih) =
           QBTL::LocalCache::get_local_by_ih(
                                          root_dir => ($opts->{root_dir} || '.'),
                                          opts_local => {torrent_dir => "/"},);
@@ -677,7 +781,6 @@ sub app {
 
           my ($savepath, $why, $add);
 
-          # --- Compute savepath + Add (single eval so errors bubble cleanly) ---
           my $ok = eval {
             my $rec = $local_by_ih->{$hash};
             die "no local record for $hash" unless ref($rec) eq 'HASH';
@@ -687,16 +790,8 @@ sub app {
             QBTL::SavePath::derive_savepath_from_payload(rec   => $rec,
                                                          debug => \@sp_dbg,);
 
-            die
-            "savepath not found ($why)\n\nSavePath debug (most recent attempts):\n"
-            . _fmt_savepath_debug(\@sp_dbg)
+            die "savepath not found ($why)\n\n" . _fmt_savepath_debug(\@sp_dbg)
             unless $savepath;
-
-            if (!$savepath)
-            {
-              my $dump = _fmt_savepath_debug(\@sp_dbg);
-              die "savepath not found ($why)\n\n$dump";
-            }
 
             $app->log->debug("ADD_ONE savepath=$savepath why=$why");
 
@@ -709,6 +804,7 @@ sub app {
           {
             my $err = "$@";
             chomp $err;
+            _add_one_mark_fail($c->app, $hash, $err);
             return
             $c->render(template => 'qbt_add_one',
                        error    => $err,
@@ -723,522 +819,60 @@ sub app {
 
           if (!$add->{ok})
           {
+            my $err = "Add failed: HTTP $add->{code} $body";
+            _add_one_mark_fail($c->app, $hash, $err);
+
             return
             $c->render(template => 'qbt_add_one',
-                       error    => "Add failed: HTTP $add->{code} $body",
+                       error    => $err,
                        picked   => {hash => $hash, source_path => $source_path},
                       );
           }
 
           if ($body =~ /fails/i)
           {
+            my $err = "qBittorrent refused add: $body";
+            _add_one_mark_fail($c->app, $hash, $err);
+
             return
             $c->render(template => 'qbt_add_one',
-                       error    => "qBittorrent refused add: $body",
+                       error    => $err,
                        picked   => {hash => $hash, source_path => $source_path},
                       );
           }
 
-          # --- Force recheck (explicit, with explicit logging) ---
-          my $re_ok = eval {
-            $qbt->recheck_hash($hash);
-            1;
-          };
-
+          my $re_ok = eval { $qbt->recheck_hash($hash); 1 };
           if (!$re_ok)
           {
             my $err = "$@";
             chomp $err;
+            my $msg = "Added OK, but recheck failed: $err";
+
+            _add_one_mark_fail($c->app, $hash, $msg);
+
             $app->log->debug("ADD_ONE recheck FAILED hash=$hash err=$err");
+
             return
             $c->render(template => 'qbt_add_one',
-                       error    => "Added OK, but recheck failed: $err",
+                       error    => $msg,
                        picked   => {hash => $hash, source_path => $source_path},
                       );
           }
 
           $app->log->debug("ADD_ONE recheck triggered hash=$hash");
+          _add_one_remove_hash($c->app, $hash);
 
-          return $c->redirect_to('/qbt/add_one');
+          my $return_to = $c->param('return_to') // '';
+          $return_to = '/qbt/add_one' unless $return_to =~ m{\A/[\w/\-]*\z};
+          return $c->redirect_to($return_to);
     });
-
-  $r->get(
-        '/qbt/hashnames' => sub {
-          my $c = shift;
-          $c->stash(dev_mode => ($opts->{dev_mode} ? 1 : 0));
-
-          my $mode = lc($c->param('mode') // 'scroll');    # scroll | paginate
-          $mode = 'scroll' unless $mode eq 'paginate';
-
-          my $per  = int($c->param('per')  // 50);
-          my $page = int($c->param('page') // 1);
-          $per  = 50 if $per < 10 || $per > 500;
-          $page = 1  if $page < 1;
-
-          my $qbt  = QBTL::QBT->new(opts => {});
-          my $list = $qbt->get_torrents_info() || [];
-
-          my @hits;
-          for my $t (@$list)
-          {
-            next if ref($t) ne 'HASH';
-            my $name = $t->{name} // '';
-            next unless $name =~ /^[0-9a-fA-F]{40}$/;
-            push @hits,
-            {hash      => ($t->{hash} // ''),
-             name      => $name,
-             state     => ($t->{state}     // ''),
-             progress  => ($t->{progress}  // -1),
-             save_path => ($t->{save_path} // ''),};
-          }
-
-          my $found = scalar(@hits);
-
-          my ($start, $end, @sample, $pages);
-          if ($mode eq 'paginate')
-          {
-            $pages = $found ? int(($found + $per - 1) / $per) : 1;
-            $page  = $pages if $page > $pages;
-
-            $start = ($page - 1) * $per;
-            $end   = $start + $per - 1;
-            $end   = $found - 1 if $end > $found - 1;
-
-            @sample = ($found && $start <= $end) ? @hits[$start .. $end] : ();
-          }
-          else
-          {
-            @sample = @hits;                       # scroll = all rows
-            $pages  = 1;
-            $start  = 0;
-            $end    = $found ? ($found - 1) : 0;
-          }
-
-          $c->stash(
-            found  => $found,
-            sample => \@sample,
-
-            mode    => $mode,
-            per     => $per,
-            page    => $page,
-            pages   => $pages,
-            start_n => ($found ? ($start + 1) : 0),
-            end_n   => ($found ? ($end + 1)   : 0),);
-
-          $c->render(template => 'qbt_hashname');
-        });
-
-  $r->post(
-        '/qbt/refresh_hashname' => sub {
-          my $c = shift;
-          $c->stash(dev_mode => ($opts->{dev_mode} ? 1 : 0));
-
-          return $c->render(text => "dev-mode required", status => 403)
-          unless $opts->{dev_mode};
-
-          my $hash = lc($c->param('hash') // '');
-          return $c->render(text => "bad hash", status => 400)
-          unless $hash =~ /^[0-9a-f]{40}$/;
-
-          # local cache
-          my $local_by_ih =
-          QBTL::LocalCache::get_local_by_ih(
-                                         root_dir => ($opts->{root_dir} || '.'),
-                                         opts_local => {torrent_dir => "/"},);
-          $local_by_ih = {} if ref($local_by_ih) ne 'HASH';
-
-          my $rec = $local_by_ih->{$hash};
-          return $c->render(
-                      template => 'qbt_hashname',    # or your per-item template
-                      error    => "No local .torrent found for $hash",)
-          unless ref($rec) eq 'HASH' && $rec->{source_path};
-
-          my $source_path = $rec->{source_path};
-
-          # hard safety: the torrent file's infohash MUST match the qbt hash
-          my $file_ih = eval { _infohash_from_torrent_file($source_path) };
-          if ($@ || !$file_ih || $file_ih !~ /^[0-9a-f]{40}$/)
-          {
-            my $e = "$@";
-            chomp $e;
-            return
-            $c->render(
-                    template => 'qbt_hashname',
-                    error => "Failed to compute infohash from torrent file: $e",
-            );
-          }
-          if (lc($file_ih) ne $hash)
-          {
-            return
-            $c->render(
-              template => 'qbt_hashname',
-              error    =>
-              "REFUSING: torrent file infohash mismatch (file=$file_ih, expected=$hash)",
-            );
-          }
-
-          my $qbt = QBTL::QBT->new(opts => {});    # your new wrapper
-
-          # refresh via add (do NOT pass savepath; let qbt keep its dl_path)
-          my $add = $qbt->add_torrent_file($source_path);
-
-          my $body = (ref($add) eq 'HASH') ? ($add->{body} // '') : '';
-          $c->app->log->debug(  "REFRESH_HASHNAME add: code="
-                              . ($add->{code} // '')
-                              . " body=$body");
-
-          # even if body says Fails., the UI-equivalent behavior can still have happened
-          # so we do the next step regardless unless HTTP itself failed
-          if (!ref($add) || !$add->{ok})
-          {
-            return
-            $c->render(
-                template => 'qbt_hashname',
-                error => "Add failed: HTTP " . ($add->{code} // '?') . " $body",
-            );
-          }
-
-          # now that metadata is refreshed, force recheck
-          eval { $qbt->recheck_hash($hash); 1 } or do
-          {
-            my $e = "$@";
-            chomp $e;
-            return
-            $c->render(
-                     template => 'qbt_hashname',
-                     error => "Added/refresh attempted, but recheck failed: $e",
-            );
-          };
-
-          # optional: track it
-          _task_upsert($c->app, $hash,
-                       stage       => 'refresh_recheck',
-                       source_path => $source_path,
-                       reason      => 'hashname refresh via add + recheck',);
-
-          return $c->redirect_to('/qbt/hashnames');
-        });
-
-  $r->get(
-        '/qbt/repair_one' => sub {
-          my $c = shift;
-          $c->stash(dev_mode => ($opts->{dev_mode} ? 1 : 0));
-          if (!$opts->{dev_mode})
-          {
-            return $c->render(text => "dev-mode required", status => 403);
-          }
-          my $hash = lc($c->param('hash') // '');
-          if ($hash !~ /^[0-9a-f]{40}$/)
-          {
-            return $c->render(text => "missing hash", status => 400);
-          }
-          my $local_by_ih = QBTL::LocalCache::get_local_by_ih(
-                       root_dir   => ($opts->{root_dir} || '.'),
-                       opts_local => {torrent_dir => "/"},         # TODO config
-                                                             );
-          my $rec = $local_by_ih->{$hash};
-          if (ref($rec) ne 'HASH' || !$rec->{source_path})
-          {
-            return
-            $c->render(template    => 'qbt_repair_one',
-                       error       => "No local .torrent found for $hash",
-                       hash        => $hash,
-                       source_path => '',);
-          }
-          return
-          $c->render(template    => 'qbt_repair_one',
-                     hash        => $hash,
-                     source_path => $rec->{source_path},);
-        });
-
-  $r->post(
-        '/qbt/repair_one' => sub {
-          my $c = shift;
-
-          $c->stash(dev_mode => ($opts->{dev_mode} ? 1 : 0));
-
-          if (!$opts->{dev_mode})
-          {
-            return $c->render(text => "dev-mode required", status => 403);
-          }
-
-          my $hash        = lc($c->param('hash') // '');
-          my $source_path = $c->param('source_path') // '';
-          my $confirm     = $c->param('confirm')     // '';
-
-          if ($hash !~ /^[0-9a-f]{40}$/)
-          {
-            return $c->render(text => "bad hash", status => 400);
-          }
-
-          if (!$confirm)
-          {
-            return $c->render(text => "confirm required", status => 400);
-          }
-
-          if (!$source_path)
-          {
-            return $c->render(text => "missing source_path", status => 400);
-          }
-
-          my $qbt = QBTL::QBT->new(opts => {});
-
-          my $exists;
-          my $ok = eval {
-            $exists = $qbt->torrent_exists($hash);
-            1;
-          };
-
-          if (!$ok)
-          {
-            my $err = "$@";
-            return
-            $c->render(template    => 'qbt_repair_one',
-                       error       => $err,
-                       hash        => $hash,
-                       source_path => $source_path,);
-          }
-
-          if ($exists)
-          {
-            return
-            $c->render(
-              template => 'qbt_repair_one',
-              error    =>
-              "Torrent already exists in qBittorrent; add refused. Next step: remove/replace.",
-              hash        => $hash,
-              source_path => $source_path,);
-          }
-
-          my $add;
-          $ok = eval {
-            $add = $qbt->add_torrent_file_paused($source_path);
-            1;
-          };
-
-          if (!$ok)
-          {
-            my $err = "$@";
-            return
-            $c->render(template    => 'qbt_repair_one',
-                       error       => $err,
-                       hash        => $hash,
-                       source_path => $source_path,);
-          }
-
-          my $body = $add->{body} // '';
-          $app->log->debug(
-                         "QBT add: ok=$add->{ok} code=$add->{code} body=$body");
-
-          if (!$add->{ok})
-          {
-            return
-            $c->render(template    => 'qbt_repair_one',
-                       error       => "Add failed: HTTP $add->{code} $body",
-                       hash        => $hash,
-                       source_path => $source_path,);
-          }
-
-          if ($body =~ /fails/i)
-          {
-            return
-            $c->render(template    => 'qbt_repair_one',
-                       error       => "qBittorrent refused add: $body",
-                       hash        => $hash,
-                       source_path => $source_path,);
-          }
-
-          return $c->redirect_to('/qbt/repairable');
-        });
-
-  $r->get(
-        '/qbt/repairable' => sub {
-          my $c = shift;
-          $c->stash(dev_mode => ($opts->{dev_mode} ? 1 : 0));
-
-          # --- 1) Broken list from QBT ---
-          my $qbt  = QBTL::QBT->new(opts => {});
-          my $list = $qbt->get_torrents_info() || [];
-          my @broken;
-          for my $t (@$list)
-          {
-            next if ref($t) ne 'HASH';
-            my $name = $t->{name} // '';
-            next unless $name =~ /^[0-9a-fA-F]{40}$/;
-            push @broken,
-            {hash      => lc($t->{hash}    // ''),
-             state     => ($t->{state}     // ''),
-             progress  => ($t->{progress}  // -1),
-             save_path => ($t->{save_path} // ''),};
-          }
-
-          # --- 2) Local map by infohash (RAW: don't pass qbt_loaded_tor) ---
-          #     my $opts_local = { torrent_dir => "/" };   # TODO: make configurable
-          #     my $scan   = QBTL::Scan::run(opts => $opts_local);
-          #     my $parsed = QBTL::Parse::run(all_torrents => $scan->{torrents}, opts => $opts_local);
-          #     my $local_by_ih = $parsed->{by_infohash} || $parsed->{infohash_map} || {};
-          #       $local_by_ih = {} if ref($local_by_ih) ne 'HASH';
-          my $local_by_ih = QBTL::LocalCache::get_local_by_ih(
-                       root_dir   => ($opts->{root_dir} || '.'),
-                       opts_local => {torrent_dir => "/"},         # TODO config
-                                                             );
-
-          # --- 3) Join ---
-          my @joined;
-          my $repairable = 0;
-          for my $b (@broken)
-          {
-            my $rec  = $local_by_ih->{$b->{hash}};
-            my $have = (ref($rec) eq 'HASH') ? 1 : 0;
-            $repairable++ if $have;
-            push @joined,
-            {%$b,
-             have_local  => $have,
-             source_path => ($have ? ($rec->{source_path} // '') : ''),
-             bucket      => ($have ? ($rec->{bucket}      // '') : ''),};
-          }
-
-          # DEV SAFETY CAP (TODO pagination)
-          my @sample = @joined > 50 ? @joined[0 .. 49] : @joined;
-          $c->stash(found      => scalar(@joined),
-                    repairable => $repairable,
-                    sample     => \@sample,);
-          $c->render(template => 'qbt_repairable');
-        });
-
-  $r->get(
-        '/qbt_state_preview' => sub {
-          my $c    = shift;
-          my $opts = {};      # later: load config/options properly
-          my $set  = eval { QBTL::QBT::infohash_set(opts => $opts) };
-          if ($@)
-          {
-            return $c->render(json => {error => "$@"});
-          }
-
-          # We don’t assume structure; just give a safe count.
-          my $count =
-            ref($set) eq 'HASH'  ? scalar(keys %$set)
-          : ref($set) eq 'ARRAY' ? scalar(@$set)
-          :                        0;
-          $c->render(json => {qbt_loaded_count => $count});
-        });
-
-  $r->get(
-        '/scan' => sub {
-          my $c   = shift;
-          my $res = QBTL::Scan::run();
-          $c->render(json => $res);
-        });
-
-  $r->get(
-        '/scan_parse_preview' => sub {
-          my $c = shift;
-
-          # Minimal opts for now (we'll load real config later)
-          my $opts = {torrent_dir => "/"};
-          my $scan = eval { QBTL::Scan::run(opts => $opts) };
-          if ($@)
-          {
-            return $c->render(json => {error => "scan: $@"});
-          }
-          my $parsed = eval {
-            QBTL::Parse::run(all_torrents => $scan->{torrents},
-                             opts         => $opts);
-          };
-          if ($@)
-          {
-            return $c->render(json => {error => "parse: $@"});
-          }
-
-          # Preview: only return counts (avoid huge JSON)
-          my $pending = $parsed->{pending_add} || [];
-          $c->render(
-                     json => {found_torrents   => $scan->{found},
-                              pending_add      => scalar(@$pending),
-                              collisions_count => (
-                                         $parsed->{collisions}
-                                         ? scalar(keys %{$parsed->{collisions}})
-                                         : 0
-                              ),
-                     });
-        });
-
-  $r->post(
-        '/tasks/poll' => sub {
-          my $c       = shift;
-          my $tasks   = $app->defaults->{tasks} || {};
-          my @hashes  = sort keys %$tasks;
-          my $qbt     = QBTL::QBT->new(opts => {});
-          my $checked = 0;
-          my $resumed = 0;
-          my $still   = 0;
-          my $suspect = 0;
-          my $missing = 0;
-
-          for my $hash (@hashes)
-          {
-            my $t = $tasks->{$hash};
-            next unless ref($t) eq 'HASH';
-            my $stage = $t->{stage} || '';
-            next unless $stage eq 'recheck_pending';
-            $checked++;
-            my $one = eval { $qbt->get_one($hash) };
-            if ($@ || ref($one) ne 'HASH')
-            {
-              _task_upsert($app, $hash,
-                           stage  => 'missing_in_qbt',
-                           reason => 'not found in qbt (or query failed)',);
-              $missing++;
-              next;
-            }
-            my $state    = $one->{state}    // '';
-            my $progress = $one->{progress} // 0;
-            _task_upsert($app, $hash,
-                         last_state    => $state,
-                         last_progress => $progress,);
-            if ($state eq 'checkingDL' || $state eq 'checkingUP')
-            {
-              $still++;
-              next;
-            }
-            if ($progress > 0)
-            {
-              my $ok = eval { $qbt->resume($hash); 1 };
-              if ($ok)
-              {
-                _task_upsert($app, $hash,
-                             stage  => 'resumed',
-                             reason => 'checking finished; progress>0',);
-                $resumed++;
-                next;
-              }
-              _task_upsert($app, $hash,
-                           stage  => 'fail_resume',
-                           reason => "resume failed: $@",);
-              next;
-            }
-            _task_upsert(
-                $app, $hash,
-                stage  => 'suspect_zero',
-                reason => 'checking finished but progress=0; not auto-resuming',
-            );
-            $suspect++;
-          }
-          $c->stash(
-            notice =>
-            "Polled $checked pending. Resumed=$resumed StillChecking=$still
-SuspectZero=$suspect Missing=$missing");
-          return $c->redirect_to('/');
-        });
 
   $r->get(
         '/torrents' => sub {
           my $c = shift;
           $c->stash(dev_mode => ($opts->{dev_mode} ? 1 : 0));
 
-          # mode/per/page/search
-          my $mode = $c->param('mode') // 'scroll';    # scroll | paginate
+          my $mode = $c->param('mode') // 'scroll';
           $mode = ($mode eq 'paginate') ? 'paginate' : 'scroll';
 
           my $per = int($c->param('per') // 50);
@@ -1251,14 +885,14 @@ SuspectZero=$suspect Missing=$missing");
           my $q = $c->param('q') // '';
           $q =~ s/^\s+|\s+$//g;
 
-          # ---------- Load local cache ----------
-          my $local_by_ih =
+          my ($local_by_ih, $mtime, $src) =
           QBTL::LocalCache::get_local_by_ih(
                                          root_dir => ($opts->{root_dir} || '.'),
                                          opts_local => {torrent_dir => "/"},);
           $local_by_ih = {} if ref($local_by_ih) ne 'HASH';
+          $c->stash(local_cache_mtime => ($mtime || 0));
+          $c->stash(local_cache_src   => ($src   || ''));
 
-          # Flatten to rows
           my @rows;
           for my $ih (keys %$local_by_ih)
           {
@@ -1270,7 +904,6 @@ SuspectZero=$suspect Missing=$missing");
             my $files       = $rec->{files};
             my $total_size  = $rec->{total_size};
 
-            # If total_size isn't already present, compute it from files[] (best effort)
             if (!defined $total_size)
             {
               my $sum = 0;
@@ -1286,7 +919,6 @@ SuspectZero=$suspect Missing=$missing");
               $total_size = $sum;
             }
 
-            # If name missing, fall back to leaf of source_path
             if (!$name && $source_path)
             {
               ($name) = $source_path =~ m{([^/]+)\z};
@@ -1301,7 +933,6 @@ SuspectZero=$suspect Missing=$missing");
              files_count => (ref($files) eq 'ARRAY') ? scalar(@$files) : 0,};
           }
 
-          # Filter
           if (length $q)
           {
             my $ql = lc($q);
@@ -1312,12 +943,10 @@ SuspectZero=$suspect Missing=$missing");
             } @rows;
           }
 
-          # Stable-ish ordering (so paginate isn't chaotic)
           @rows = sort { ($a->{name} // '') cmp($b->{name} // '') } @rows;
 
           my $found = scalar(@rows);
 
-          # Pagination slice
           my ($pages, $start_n, $end_n) = (1, 0, 0);
           my @sample = @rows;
 
@@ -1336,14 +965,12 @@ SuspectZero=$suspect Missing=$missing");
           }
           else
           {
-            # scroll mode: show all
             $pages   = 1;
             $page    = 1;
             $start_n = $found ? 1      : 0;
             $end_n   = $found ? $found : 0;
           }
 
-          # Human bytes helper: use what you already have
           my $human = sub {
             my ($n) = @_;
             $n ||= 0;
@@ -1370,9 +997,8 @@ SuspectZero=$suspect Missing=$missing");
   # ---------- Idle observer tick ----------
   my $tick_seconds = 5;
   Mojo::IOLoop->recurring(
-        $tick_seconds => sub {
-          _qbt_observer_tick($app, $opts);
-        });
+                      $tick_seconds => sub { _qbt_observer_tick($app, $opts) });
+
   return $app;
 }
 

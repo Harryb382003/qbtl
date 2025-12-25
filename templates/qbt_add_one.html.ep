@@ -1,16 +1,30 @@
 % layout 'main';
 % title 'QBTL - Add one';
-
 % my $picked = stash('picked');
+% my $meta   = stash('add_one_meta') || {};
+% my $pos    = stash('add_one_idx') || 0;
+% my $qn     = stash('add_one_queue_n') || 0;
 
 <h1>Add one missing torrent</h1>
 
 % if (stash('error')) {
-    <pre style="color:red; white-space:pre-wrap;"><%= stash('error') %></pre>
+  <pre style="color:red; white-space:pre-wrap;"><%= stash('error') %></pre>
 % }
-% if (stash('picked')) {
+
+% if ($picked) {
   <p><b>Picked infohash:</b> <code><%= $picked->{hash} %></code></p>
   <p><b>Local .torrent:</b> <%= $picked->{source_path} %></p>
+
+  % if ($qn) {
+    <p><small>Queue: <%= $pos %> / <%= $qn %></small></p>
+  % }
+
+  % if ($meta->{failed_once}) {
+    <pre style="color:#b00; white-space:pre-wrap;">
+Last failure: <%= scalar(localtime($meta->{ts} || 0)) %>
+<%= $meta->{last_error} || '' %>
+    </pre>
+  % }
 
   <form method="post" action="/qbt/add_one">
     <input type="hidden" name="hash" value="<%= $picked->{hash} %>">
@@ -23,6 +37,12 @@
       <button type="submit">Add</button>
     </div>
   </form>
+
+  <form method="get" action="/qbt/add_one" style="margin-top:10px;">
+    <input type="hidden" name="next" value="1">
+    <button type="submit">Next torrent</button>
+  </form>
+
 % } else {
   <p>No missing torrents found.</p>
 % }

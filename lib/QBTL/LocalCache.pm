@@ -1,31 +1,78 @@
 package QBTL::LocalCache;
+
+# lib/QBTL/LocalCache.pm
 use common::sense;
 
 use JSON::PP    ();
 use File::Temp  qw(tempfile);
 use File::Slurp qw(read_file write_file);
+use Storable    qw(nstore retrieve);
 
 use QBTL::Scan;
 use QBTL::Parse;
 
-our %_MEMO;
+my %_MEMO;    # { path_key => { mtime => ..., data => ... } }
 
-sub cache_path {
+sub cache_path { cache_path_json(@_) }
+
+sub cache_path_json {
   my (%args) = @_;
   my $root = $args{root_dir} || '.';
   return "$root/db/local_by_ih_cache.json";
 }
 
-sub load_local_by_ih {
+sub cache_path_bin {
   my (%args) = @_;
-  my $path = cache_path(%args);
+  my $root = $args{root_dir} || '.';
+  return "$root/db/local_by_ih_cache.stor";
+}
 
+sub _load_with_memo {
+  my ($path, $loader) = @_;
   return undef unless -e $path;
 
-  my $json = read_file($path, binmode => ':raw');
-  my $data = JSON::PP->new->utf8->decode($json);
+  my $mtime = (stat($path))[9] || 0;
 
-  return (ref($data) eq 'HASH') ? $data : undef;
+  if (my $m = $_MEMO{$path})
+  {
+    return $m->{data} if ($m->{mtime} || 0) == $mtime;
+  }
+
+  my $data = $loader->();
+  $data = {} if ref($data) ne 'HASH';
+
+  $_MEMO{$path} = {mtime => $mtime, data => $data};
+  return $data;
+}
+
+sub load_local_by_ih {
+  my (%args) = @_;
+
+  my $bin  = cache_path_bin(%args);
+  my $json = cache_path_json(%args);
+
+  # Prefer binary if present
+  if (-e $bin)
+  {
+    my $data = _load_with_memo($bin, sub { retrieve($bin) });
+    return unless $data && ref($data) eq 'HASH';
+    my $mtime = (stat($bin))[9] || 0;
+    return ($data, $mtime, $bin);
+  }
+
+  return unless -e $json;
+
+  my $data = _load_with_memo(
+        $json,
+        sub {
+          my $raw  = read_file($json);
+          my $data = JSON::PP::decode_json($raw);
+          return $data;
+        });
+
+  return unless $data && ref($data) eq 'HASH';
+  my $mtime = (stat($json))[9] || 0;
+  return ($data, $mtime, $json);
 }
 
 sub build_local_by_ih {
@@ -40,52 +87,35 @@ sub build_local_by_ih {
   my $local_by_ih = $parsed->{by_infohash} || $parsed->{infohash_map} || {};
   $local_by_ih = {} if ref($local_by_ih) ne 'HASH';
 
-  my $path = cache_path(root_dir => $root_dir);
+  my $path_json = cache_path_json(root_dir => $root_dir);
+  my $path_bin  = cache_path_bin(root_dir => $root_dir);
 
+  # write binary first (fastest path for next restart)
+  nstore($local_by_ih, $path_bin);
+
+  # write json for humans
   my $json = JSON::PP->new->utf8->pretty->canonical(1)->encode($local_by_ih);
-
-  # atomic write
-  my ($fh, $tmp) = tempfile("$path.XXXX", UNLINK => 0);
-  binmode($fh, ':raw');
+  my ($fh, $tmp) = tempfile("$path_json.XXXX", UNLINK => 0);
   print {$fh} $json;
   close $fh;
-  rename $tmp, $path or die "rename($tmp → $path): $!";
-  $_MEMO{$path} = {mtime => (stat($path))[9] || time(), data => $local_by_ih};
-  return $local_by_ih;
+  rename $tmp, $path_json or die "rename($tmp → $path_json): $!";
+
+  # refresh memo immediately (no next-request lag)
+  my $mtime_bin  = (stat($path_bin))[9]  || time();
+  my $mtime_json = (stat($path_json))[9] || time();
+
+  $_MEMO{$path_bin}  = {mtime => $mtime_bin,  data => $local_by_ih};
+  $_MEMO{$path_json} = {mtime => $mtime_json, data => $local_by_ih};
+
+  # IMPORTANT: since you *prefer* .stor at load time, report THAT as "Last Cache"
+  return ($local_by_ih, $mtime_bin, $path_bin);
 }
 
 sub get_local_by_ih {
   my (%args) = @_;
-  my $path = cache_path(%args);
+  my ($data, $mtime, $src) = load_local_by_ih(%args);
+  return ($data, $mtime, $src) if $data;
 
-  # If file exists, use memoized decoded JSON unless mtime changed
-  if (-e $path)
-  {
-    my $mtime = (stat($path))[9] || 0;
-
-    my $m = $_MEMO{$path};
-    if ($m && ($m->{mtime} // 0) == $mtime && ref($m->{data}) eq 'HASH')
-    {
-      return $m->{data};
-    }
-
-    # reload + decode once
-    my $json = read_file($path);
-    my $data = JSON::PP::decode_json($json);
-    $data = {} if ref($data) ne 'HASH';
-
-    $_MEMO{$path} = {mtime => $mtime, data => $data};
-    return $data;
-  }
-
-  # No file yet -> build, then memoize
-  my $data = build_local_by_ih(%args);
-  $data = {} if ref($data) ne 'HASH';
-
-  my $mtime = (-e $path) ? ((stat($path))[9] || 0) : time();
-  $_MEMO{$path} = {mtime => $mtime, data => $data};
-
-  return $data;
+  return build_local_by_ih(%args);
 }
-
 1;

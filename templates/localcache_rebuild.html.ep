@@ -5,7 +5,7 @@
 % my $ts = stash('local_cache_mtime') || 0;
 % my $pretty = $ts ? scalar(localtime($ts)) : 'never';
 
-<form method="post" action="/cache/rebuild">
+<form method="post" action="/localcache/rebuild">
   <button type="submit">
     Rebuild Cache<br>
     <small>Last: <%= $pretty %></small>
