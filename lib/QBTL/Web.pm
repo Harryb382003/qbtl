@@ -13,54 +13,6 @@ use QBTL::Plan;
 use QBTL::QBT;
 use QBTL::Scan;
 
-sub _add_one_state {
-  my ($app) = @_;
-  $app->defaults->{add_one} ||= {
-         queue => [],         # arrayref of infohashes
-         idx   => 0,          # current cursor
-         meta  => {}
-         ,    # { ih => { failed_once => 1, last_error => "...", ts => epoch } }
-         cache_mtime => 0,    # mtime used when queue was built
-                                };
-  return $app->defaults->{add_one};
-}
-
-sub _shuffle_in_place {
-  my ($a) = @_;
-  return $a unless ref($a) eq 'ARRAY';
-  for (my $i = @$a - 1 ; $i > 0 ; $i--)
-  {
-    my $j = int(rand($i + 1));
-    next if $i == $j;
-    @$a[$i, $j] = @$a[$j, $i];
-  }
-  return $a;
-}
-
-sub _add_one_build_queue {
-  my (%args)      = @_;
-  my $app         = $args{app};
-  my $local_by_ih = $args{local_by_ih} || {};
-  my $qbt_by_ih   = $args{qbt_by_ih}   || {};
-  my $cache_mtime = $args{cache_mtime} || 0;
-
-  my $st = _add_one_state($app);
-
-  my @missing =
-      grep { !exists $qbt_by_ih->{$_} }
-      grep { defined($_) && $_ =~ /^[0-9a-f]{40}$/ }
-      keys %$local_by_ih;
-
-  _shuffle_in_place(\@missing);
-
-  $st->{queue}       = \@missing;
-  $st->{idx}         = 0;
-  $st->{cache_mtime} = $cache_mtime || 0;
-
-  # NOTE: keep $st->{meta} (failure history) across rebuilds unless you prefer to clear it.
-  return $st->{queue};
-}
-
 sub _add_one_advance {
   my ($app) = @_;
   my $st    = _add_one_state($app);
@@ -71,6 +23,33 @@ sub _add_one_advance {
   $st->{idx} = 0 if $st->{idx} >= $n;
 
   return $st->{queue}[$st->{idx}];
+}
+
+sub _add_one_build_queue {
+  my (%args)      = @_;
+  my $app         = $args{app} or die "missing app";
+  my $local_by_ih = $args{local_by_ih} || {};
+  my $qbt_by_ih   = $args{qbt_by_ih}   || {};
+  my $cache_mtime = $args{cache_mtime} || 0;
+
+  my $st = _add_one_state($app);
+
+  my @q;
+  for my $ih (keys %$local_by_ih)
+  {
+    next unless defined $ih && $ih =~ /^[0-9a-f]{40}$/;
+    next if exists $qbt_by_ih->{$ih};
+    push @q, $ih;
+  }
+
+  # Optional: pseudo-randomize without relying on hash order
+  @q = sort { rand() <=> rand() } @q;
+
+  $st->{queue}       = \@q;
+  $st->{idx}         = 0;
+  $st->{cache_mtime} = $cache_mtime;
+
+  return;
 }
 
 sub _add_one_current {
@@ -87,9 +66,74 @@ sub _add_one_current {
   return $q->[$i];
 }
 
+sub _add_one_mark_fail {
+  my ($app, $ih, $err) = @_;
+  $ih = ($ih // '');
+  return unless $ih =~ /^[0-9a-f]{40}$/;
+
+  my $st = _add_one_state($app);
+  $st->{meta}{$ih} ||= {};
+  $st->{meta}{$ih}{failed_once} = 1;
+  $st->{meta}{$ih}{last_error}  = (defined $err ? $err : '');
+  $st->{meta}{$ih}{ts}          = time;
+
+  return;
+}
+
+sub _add_one_meta_ref {
+  my ($app) = @_;
+  $app->defaults->{add_one_meta} ||= {};
+  return $app->defaults->{add_one_meta};
+}
+
+sub _add_one_note_fail {
+  my ($app, $hash, $err, %extra) = @_;
+  return unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
+
+  my $m = _add_one_meta_ref($app);
+
+  my $rec = ($m->{$hash} ||= {hash => $hash, retries => 0, fails => 0});
+
+  $rec->{fails}++;
+  $rec->{failed_once} = 1 if $rec->{fails} >= 1;
+  $rec->{last_error}  = $err // '';
+  $rec->{ts_fail}     = time;
+
+  # optional breadcrumbs, no behavior
+  for my $k (keys %extra) { $rec->{$k} = $extra{$k} }
+
+  return $rec;
+}
+
+sub _add_one_note_ok {
+  my ($app, $hash, %extra) = @_;
+  return unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
+
+  my $m = _add_one_meta_ref($app);
+
+  my $rec = ($m->{$hash} ||= {hash => $hash, retries => 0, fails => 0});
+  $rec->{ts_ok} = time;
+
+  for my $k (keys %extra) { $rec->{$k} = $extra{$k} }
+
+  return $rec;
+}
+
+sub _add_one_state {
+  my ($app) = @_;
+  $app->defaults->{add_one} ||= {
+         queue => [],         # arrayref of infohashes
+         idx   => 0,          # current cursor
+         meta  => {}
+         ,    # { ih => { failed_once => 1, last_error => "...", ts => epoch } }
+         cache_mtime => 0,    # mtime used when queue was built
+                                };
+  return $app->defaults->{add_one};
+}
+
 sub _add_one_remove_hash {
   my ($app, $ih) = @_;
-  $ih = lc($ih // '');
+  $ih = ($ih // '');
   return unless $ih =~ /^[0-9a-f]{40}$/;
 
   my $st = _add_one_state($app);
@@ -98,7 +142,7 @@ sub _add_one_remove_hash {
   for (my $i = 0 ; $i < @$q ; $i++)
   {
     next unless defined $q->[$i];
-    next unless lc($q->[$i]) eq $ih;
+    next unless $q->[$i] eq $ih;
 
     splice(@$q, $i, 1);
 
@@ -108,20 +152,6 @@ sub _add_one_remove_hash {
   }
 
   $st->{queue} = $q;
-  return;
-}
-
-sub _add_one_mark_fail {
-  my ($app, $ih, $err) = @_;
-  $ih = lc($ih // '');
-  return unless $ih =~ /^[0-9a-f]{40}$/;
-
-  my $st = _add_one_state($app);
-  $st->{meta}{$ih} ||= {};
-  $st->{meta}{$ih}{failed_once} = 1;
-  $st->{meta}{$ih}{last_error}  = (defined $err ? $err : '');
-  $st->{meta}{$ih}{ts}          = time;
-
   return;
 }
 
@@ -193,48 +223,20 @@ sub _fmt_savepath_debug {
   return join("\n", @out);
 }
 
-sub _tasks_ref {
-  my ($app) = @_;
-  $app->defaults->{tasks} ||= {};
-  return $app->defaults->{tasks};
-}
-
-sub _task_counts {
-  my ($app) = @_;
-  my $tasks = _tasks_ref($app);
-
-  my %counts;
-  for my $hash (keys %$tasks)
-  {
-    my $t = $tasks->{$hash};
-    next unless ref($t) eq 'HASH';
-    my $stage = $t->{stage} || 'unknown';
-    $counts{$stage}++;
-  }
-
-  my $total = scalar(keys %$tasks);
-  return ($total, \%counts);
-}
-
-sub _task_fail_items {
-  my ($app, $limit) = @_;
-  $limit ||= 200;
-
-  my $tasks = _tasks_ref($app);
-  my @fails;
-
-  for my $hash (keys %$tasks)
-  {
-    my $t = $tasks->{$hash};
-    next unless ref($t) eq 'HASH';
-    next unless ($t->{stage} || '') eq 'fail';
-    push @fails, $t;
-  }
-
-  @fails = sort { ($b->{ts} || 0) <=> ($a->{ts} || 0) } @fails;
-
-  @fails = @fails[0 .. ($limit - 1)] if @fails > $limit;
-  return \@fails;
+sub _infohash_from_torrent_file {
+  my ($path) = @_;
+  require Bencode;
+  my $raw = do
+      {
+        open my $fh, '<:raw', $path or die "open($path): $!";
+        local $/;
+        <$fh>;
+      };
+  my $t = Bencode::bdecode($raw);
+  die "not a torrent (no info dict)"
+      unless ref($t) eq 'HASH' && ref($t->{info}) eq 'HASH';
+  my $info_bencoded = Bencode::bencode($t->{info});
+  return sha1_hex($info_bencoded);
 }
 
 sub _qbt_observer_tick {
@@ -353,20 +355,60 @@ sub _qbt_snapshot {
   return ($list, \%by);
 }
 
-sub _infohash_from_torrent_file {
-  my ($path) = @_;
-  require Bencode;
-  my $raw = do
-      {
-        open my $fh, '<:raw', $path or die "open($path): $!";
-        local $/;
-        <$fh>;
-      };
-  my $t = Bencode::bdecode($raw);
-  die "not a torrent (no info dict)"
-      unless ref($t) eq 'HASH' && ref($t->{info}) eq 'HASH';
-  my $info_bencoded = Bencode::bencode($t->{info});
-  return sha1_hex($info_bencoded);
+sub _shuffle_in_place {
+  my ($a) = @_;
+  return $a unless ref($a) eq 'ARRAY';
+  for (my $i = @$a - 1 ; $i > 0 ; $i--)
+  {
+    my $j = int(rand($i + 1));
+    next if $i == $j;
+    @$a[$i, $j] = @$a[$j, $i];
+  }
+  return $a;
+}
+
+sub _task_counts {
+  my ($app) = @_;
+  my $tasks = _tasks_ref($app);
+
+  my %counts;
+  for my $hash (keys %$tasks)
+  {
+    my $t = $tasks->{$hash};
+    next unless ref($t) eq 'HASH';
+    my $stage = $t->{stage} || 'unknown';
+    $counts{$stage}++;
+  }
+
+  my $total = scalar(keys %$tasks);
+  return ($total, \%counts);
+}
+
+sub _task_fail_items {
+  my ($app, $limit) = @_;
+  $limit ||= 200;
+
+  my $tasks = _tasks_ref($app);
+  my @fails;
+
+  for my $hash (keys %$tasks)
+  {
+    my $t = $tasks->{$hash};
+    next unless ref($t) eq 'HASH';
+    next unless ($t->{stage} || '') eq 'fail';
+    push @fails, $t;
+  }
+
+  @fails = sort { ($b->{ts} || 0) <=> ($a->{ts} || 0) } @fails;
+
+  @fails = @fails[0 .. ($limit - 1)] if @fails > $limit;
+  return \@fails;
+}
+
+sub _tasks_ref {
+  my ($app) = @_;
+  $app->defaults->{tasks} ||= {};
+  return $app->defaults->{tasks};
 }
 
 sub _task_upsert {
@@ -601,6 +643,18 @@ sub app {
           my $c = shift;
           $c->stash(dev_mode => ($opts->{dev_mode} ? 1 : 0));
 
+          # OK click? leave this screen (optionally bump first)
+          my $ok = $c->param('ok') // '';
+          if ($ok)
+          {
+            _add_one_advance($c->app)
+            ;    # bump semantics (you said you want OK == move on)
+
+            my $return_to = $c->param('return_to') // '';
+            $return_to = '/qbt/add_one' unless $return_to =~ m{\A/[\w/\-]*\z};
+
+            return $c->redirect_to($return_to);
+          }
           my ($local_by_ih, $cache_mtime, $cache_src) =
           QBTL::LocalCache::get_local_by_ih(
                                          root_dir => ($opts->{root_dir} || '.'),
@@ -634,18 +688,12 @@ sub app {
           # Optional explicit hash (?hash=...)
           my $want_hash = $c->param('hash') // '';
           $want_hash =~ s/\s+//g;
-          $want_hash = '' unless $want_hash =~ /^[0-9a-fA-F]{40}$/;
-
+          $want_hash = '' unless $want_hash =~ /^[0-9a-f]{40}$/;
           my $pick_hash;
-
           if ($want_hash)
           {
-            my $want_lc = lc($want_hash);
-
-            # Preserve original casing from local_by_ih keys (even though you usually store lc)
-            ($pick_hash) = grep { lc($_) eq $want_lc } keys %$local_by_ih;
-
-            if (!$pick_hash)
+            $pick_hash = $want_hash;
+            if (!exists $local_by_ih->{$pick_hash})
             {
               return
               $c->render(
@@ -653,8 +701,7 @@ sub app {
                  error => "Requested hash not found in local cache: $want_hash",
               );
             }
-
-            if (exists $qbt_by_ih->{lc($pick_hash)})
+            if (exists $qbt_by_ih->{$pick_hash})
             {
               return
               $c->render(
@@ -666,14 +713,12 @@ sub app {
           }
           else
           {
-            $pick_hash = _add_one_current($c->app);
+            $pick_hash = $st->{queue}[$st->{idx}] if @{$st->{queue} || []};
           }
 
           return $c->render(template => 'qbt_add_one') unless $pick_hash;
 
-          my $ih_lc = lc($pick_hash);
-
-          my $rec = $local_by_ih->{$pick_hash} || $local_by_ih->{$ih_lc};
+          my $rec = $local_by_ih->{$pick_hash};
           my $source_path =
           (ref($rec) eq 'HASH') ? ($rec->{source_path} // '') : '';
 
@@ -685,16 +730,13 @@ sub app {
                       );
           }
 
-          my $meta = _add_one_state($c->app)->{meta}{$ih_lc} || {};
+          my $meta = _add_one_state($c->app)->{meta}{$pick_hash} || {};
 
-          $c->stash(
-            picked       => {hash => $ih_lc, source_path => $source_path},
-            add_one_meta => $meta,
-
-            # handy for UI/debug
-            add_one_queue_n =>
-            scalar(@{_add_one_state($c->app)->{queue} || []}),
-            add_one_idx => (_add_one_state($c->app)->{idx} || 0) + 1,);
+          $c->stash(picked => {hash => $pick_hash, source_path => $source_path},
+                    add_one_meta    => $meta,
+                    add_one_queue_n =>
+                    scalar(@{_add_one_state($c->app)->{queue} || []}),
+                    add_one_idx => (_add_one_state($c->app)->{idx} || 0) + 1,);
 
           return $c->render(template => 'qbt_add_one');
         });
@@ -706,7 +748,6 @@ sub app {
 
           my $hash = $c->param('hash') // '';
           $hash =~ s/\s+//g;
-          $hash = lc $hash;
 
           my $source_path = $c->param('source_path') // '';
 
@@ -717,6 +758,8 @@ sub app {
           unless $hash =~ /^[0-9a-f]{40}$/;
 
           my $confirm = $c->param('confirm') // '';
+          my $retry   = $c->param('retry')   // 0;  # hook only (unused for now)
+
           if (!$confirm)
           {
             return
@@ -725,6 +768,7 @@ sub app {
                        picked   => {hash => $hash, source_path => $source_path},
                       );
           }
+
           if (!$source_path)
           {
             return
@@ -736,12 +780,15 @@ sub app {
 
           my $qbt = QBTL::QBT->new(opts => {});
 
-          # --- Pre-check: already exists in qBittorrent? (stale cache / already added) ---
-          my $exists = eval { $qbt->torrent_exists(lc($hash)) };
+          # --- Pre-check: already exists in qBittorrent? (stale queue / already added) ---
+          my $exists = eval { $qbt->torrent_exists($hash) };
           if ($@)
           {
             my $err = "$@";
             chomp $err;
+            _add_one_mark_fail($c->app, $hash,
+                               "torrent_exists check failed: $err");
+
             return
             $c->render(template => 'qbt_add_one',
                        error    => "torrent_exists check failed: $err",
@@ -751,11 +798,12 @@ sub app {
 
           if ($exists)
           {
-            # Treat as "success" from the POV of local queue: it's already there.
-            _add_one_remove_hash($c->app, $hash);
-
             my $msg =
-            "Already exists in qBittorrent (stale cache or previously added): $hash";
+            "Already exists in qBittorrent (stale queue or previously added): $hash";
+
+            # DO NOT remove from queue here — this is a stale-queue signal.
+            _add_one_mark_fail($c->app, $hash, $msg);
+
             return
             $c->render(template => 'qbt_add_one',
                        error    => $msg,
@@ -805,6 +853,7 @@ sub app {
             my $err = "$@";
             chomp $err;
             _add_one_mark_fail($c->app, $hash, $err);
+
             return
             $c->render(template => 'qbt_add_one',
                        error    => $err,
@@ -841,6 +890,24 @@ sub app {
                       );
           }
 
+          # --- Post-check: did it actually land in qBittorrent? ---
+          my $post_exists = eval { $qbt->torrent_exists($hash) };
+          if ($@ || !$post_exists)
+          {
+            my $err =
+            $@
+            ? "post-add torrent_exists failed: $@"
+            : "Add returned success-ish, but torrent not present in qBittorrent";
+            chomp $err;
+            _add_one_mark_fail($c->app, $hash, $err);
+
+            return
+            $c->render(template => 'qbt_add_one',
+                       error    => $err,
+                       picked   => {hash => $hash, source_path => $source_path},
+                      );
+          }
+
           my $re_ok = eval { $qbt->recheck_hash($hash); 1 };
           if (!$re_ok)
           {
@@ -864,10 +931,13 @@ sub app {
 
           my $return_to = $c->param('return_to') // '';
           $return_to = '/qbt/add_one' unless $return_to =~ m{\A/[\w/\-]*\z};
+
           return $c->redirect_to($return_to);
     });
 
   $r->get(
+
+        # page view
         '/torrents' => sub {
           my $c = shift;
           $c->stash(dev_mode => ($opts->{dev_mode} ? 1 : 0));

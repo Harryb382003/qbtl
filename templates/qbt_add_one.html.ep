@@ -1,34 +1,32 @@
 % layout 'main';
 % title 'QBTL - Add one';
-% my $picked = stash('picked');
-% my $meta   = stash('add_one_meta') || {};
-% my $pos    = stash('add_one_idx') || 0;
-% my $qn     = stash('add_one_queue_n') || 0;
+
+% my $picked    = stash('picked');          # { hash, source_path }
+% my $err       = stash('error') // '';
+% my $notice    = stash('notice') // '';
+% my $return_to = param('return_to') // stash('return_to') // '';
 
 <h1>Add one missing torrent</h1>
 
-% if (stash('error')) {
-  <pre style="color:red; white-space:pre-wrap;"><%= stash('error') %></pre>
+% if ($err) {
+  <pre style="color:red; white-space:pre-wrap;"><%= $err %></pre>
 % }
 
-% if ($picked) {
+% if ($notice) {
+  <pre style="color:green; white-space:pre-wrap;"><%= $notice %></pre>
+% }
+
+% if ($picked && ref($picked) eq 'HASH') {
   <p><b>Picked infohash:</b> <code><%= $picked->{hash} %></code></p>
   <p><b>Local .torrent:</b> <%= $picked->{source_path} %></p>
 
-  % if ($qn) {
-    <p><small>Queue: <%= $pos %> / <%= $qn %></small></p>
-  % }
-
-  % if ($meta->{failed_once}) {
-    <pre style="color:#b00; white-space:pre-wrap;">
-Last failure: <%= scalar(localtime($meta->{ts} || 0)) %>
-<%= $meta->{last_error} || '' %>
-    </pre>
-  % }
-
-  <form method="post" action="/qbt/add_one">
+  <!-- ADD: POST (never nest another form inside this) -->
+  <form method="post" action="/qbt/add_one" style="margin-top:10px;">
     <input type="hidden" name="hash" value="<%= $picked->{hash} %>">
     <input type="hidden" name="source_path" value="<%= $picked->{source_path} %>">
+% if ($return_to) {
+    <input type="hidden" name="return_to" value="<%= $return_to %>">
+% }
     <label>
       <input type="checkbox" name="confirm" value="1">
       Add this torrent to qBittorrent
@@ -38,11 +36,24 @@ Last failure: <%= scalar(localtime($meta->{ts} || 0)) %>
     </div>
   </form>
 
+  <!-- OK: GET (acknowledge and leave this screen) -->
   <form method="get" action="/qbt/add_one" style="margin-top:10px;">
-    <input type="hidden" name="next" value="1">
-    <button type="submit">Next torrent</button>
+  <input type="hidden" name="ok" value="1">
+% if ($return_to) {
+    <input type="hidden" name="return_to" value="<%= $return_to %>">
+% }
+    <button type="submit">OK</button>
   </form>
 
 % } else {
   <p>No missing torrents found.</p>
+
+  <!-- OK here just returns to caller if present, else stays on add_one -->
+  <form method="get" action="/qbt/add_one" style="margin-top:10px;">
+% if ($return_to) {
+    <input type="hidden" name="return_to" value="<%= $return_to %>">
 % }
+    <button type="submit">OK</button>
+  </form>
+% }
+

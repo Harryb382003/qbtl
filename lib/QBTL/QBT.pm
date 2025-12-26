@@ -20,19 +20,6 @@ sub new {
   return $self;
 }
 
-#   my $self = bless {
-#     opts     => $opts,
-#     legacy   => $legacy,
-#     ua       => $legacy->{ua},
-#     base_url => $legacy->{base_url},
-#   }, $class;
-#
-#   die "QBTL::QBT->new: missing ua/base_url (legacy init failed?)"
-#     unless $self->{ua} && $self->{base_url};
-#
-#   return $self;
-# }
-
 sub _login {
   Logger::debug("#	_login");
   my $self = shift;
@@ -43,8 +30,6 @@ sub _login {
 
   die "Login failed: " . $res->status_line unless $res->is_success;
 }
-
-#sub _legacy { shift->{legacy} }
 
 # ------------------------------
 # Read
@@ -61,8 +46,8 @@ sub get_torrents_info {
     my $h = $args{hashes};
     $h =~ s/\s+//g;
 
-    # Allow 1+ 40-hex hashes separated by '|'
-    die "bad hashes" unless $h =~ /^[0-9a-fA-F]{40}(?:\|[0-9a-fA-F]{40})*$/;
+    # canonical: lower-hex only (fail loudly if anything else shows up)
+    die "bad hashes" unless $h =~ /^[0-9a-f]{40}(?:\|[0-9a-f]{40})*$/;
 
     $url .= "?hashes=$h";
   }
@@ -76,7 +61,7 @@ sub get_torrents_info {
 
 sub torrent_info_one {
   my ($self, $hash) = @_;
-  die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-fA-F]{40}$/;
+  die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-f]{40}$/;
 
   my $arr = $self->get_torrents_info(hashes => $hash);
   return {} unless ref($arr) eq 'ARRAY' && @$arr && ref($arr->[0]) eq 'HASH';
@@ -86,9 +71,7 @@ sub torrent_info_one {
 sub torrent_exists {
   my ($self, $hash) = @_;
   my $t = $self->torrent_info_one($hash);
-  return (ref($t) eq 'HASH' && ($t->{hash} // '') =~ /^[0-9a-fA-F]{40}$/)
-      ? 1
-      : 0;
+  return (ref($t) eq 'HASH' && ($t->{hash} // '') =~ /^[0-9a-f]{40}$/) ? 1 : 0;
 }
 
 sub get_torrents_infohash {
@@ -101,40 +84,20 @@ sub get_torrents_infohash {
   {
     next if ref($t) ne 'HASH';
     my $h = $t->{hash} // '';
-    next unless $h =~ /^[0-9a-fA-F]{40}$/;
-    $by_ih{lc($h)} = $t;
+
+    # canonical: lower-hex only
+    next unless $h =~ /^[0-9a-f]{40}$/;
+
+    $by_ih{$h} = $t;
   }
 
   return \%by_ih;    # { infohash => {...} }
 }
 
-sub torrent_info {
-  my ($self, $hash) = @_;
-  die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-f]{40}$/;
-
-  my $res =
-      $self->{ua}->get("$self->{base_url}/api/v2/torrents/info?hashes=$hash");
-  die "torrent_info failed: " . $res->status_line unless $res->is_success;
-
-  my $arr = decode_json($res->decoded_content);
-  return (ref($arr) eq 'ARRAY' && @$arr) ? ($arr->[0] || {}) : {};
-}
-
-# Keep the old name so callers don't change.
-sub torrent_info_one {
-  my ($self, $hash) = @_;
-  return $self->torrent_info($hash);
-}
-
-sub torrent_exists {
-  my ($self, $hash) = @_;
-  my $t = $self->torrent_info_one($hash);
-  return (ref($t) eq 'HASH' && ($t->{hash} // '') =~ /^[0-9a-f]{40}$/) ? 1 : 0;
-}
-
 # ------------------------------
 # Actions
 # ------------------------------
+
 sub add_torrent_file {
   my ($self, $torrent_path, $savepath) = @_;
 
@@ -142,7 +105,7 @@ sub add_torrent_file {
 
   my @content = (torrents => [$torrent_path]);
 
-  # THIS is the key: qBittorrent expects the field name "savepath"
+  # qBittorrent expects the field name "savepath"
   if (defined $savepath && length $savepath)
   {
     push @content, (savepath => $savepath);
@@ -161,7 +124,7 @@ sub add_torrent_file {
 
 sub recheck_hash {
   my ($self, $hash) = @_;
-  die "bad hash" unless defined $hash && $hash =~ /^[0-9a-f]{40}$/i;
+  die "bad hash" unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
 
   require HTTP::Request::Common;
 
@@ -185,10 +148,16 @@ sub resume_hash {
   my ($self, $hash) = @_;
   die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-f]{40}$/;
 
-  my $res = $self->{ua}->post("$self->{base_url}/api/v2/torrents/resume",
-                              form => {hashes => $hash},);
+  my $res =
+      $self->{ua}
+      ->post("$self->{base_url}/api/v2/torrents/resume", {hashes => $hash},);
 
-  die "Failed to resume: " . $res->status_line unless $res->is_success;
+  die "Failed to resume: "
+      . $res->status_line
+      . " body="
+      . ($res->decoded_content // '')
+      unless $res->is_success;
+
   return 1;
 }
 
@@ -196,10 +165,16 @@ sub pause_hash {
   my ($self, $hash) = @_;
   die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-f]{40}$/;
 
-  my $res = $self->{ua}->post("$self->{base_url}/api/v2/torrents/pause",
-                              form => {hashes => $hash},);
+  my $res =
+      $self->{ua}
+      ->post("$self->{base_url}/api/v2/torrents/pause", {hashes => $hash},);
 
-  die "Failed to pause: " . $res->status_line unless $res->is_success;
+  die "Failed to pause: "
+      . $res->status_line
+      . " body="
+      . ($res->decoded_content // '')
+      unless $res->is_success;
+
   return 1;
 }
 

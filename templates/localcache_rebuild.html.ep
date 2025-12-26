@@ -5,9 +5,62 @@
 % my $ts = stash('local_cache_mtime') || 0;
 % my $pretty = $ts ? scalar(localtime($ts)) : 'never';
 
-<form method="post" action="/localcache/rebuild">
-  <button type="submit">
+<style>
+  .qbtl-spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    margin-right: 8px;
+    border: 2px solid rgba(0,0,0,.25);
+    border-top-color: rgba(0,0,0,.75);
+    border-radius: 50%;
+    animation: qbtl-spin 0.8s linear infinite;
+    vertical-align: -2px;
+  }
+  @keyframes qbtl-spin { to { transform: rotate(360deg); } }
+</style>
+
+<form id="rebuildForm" method="post" action="/localcache/rebuild">
+  <button id="rebuildBtn" type="submit">
     Rebuild Cache<br>
     <small>Last: <%= $pretty %></small>
   </button>
 </form>
+
+<script>
+  (function () {
+    var form = document.getElementById('rebuildForm');
+    var btn  = document.getElementById('rebuildBtn');
+    if (!form || !btn) return;
+
+    var original = btn.innerHTML;
+
+    form.addEventListener('submit', function () {
+      btn.disabled = true;
+      btn.innerHTML =
+        '<span class="qbtl-spinner"></span>Rebuilding…<br><small>Please wait</small>';
+    });
+
+    // If user hits back and the browser restores the page from bfcache,
+    // re-enable button.
+    window.addEventListener('pageshow', function () {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    });
+  })();
+</script>
+
+
+# % layout 'main';
+# % title 'Rebuild local cache';
+#
+# <h1>Rebuild local cache</h1>
+# % my $ts = stash('local_cache_mtime') || 0;
+# % my $pretty = $ts ? scalar(localtime($ts)) : 'never';
+#
+# <form method="post" action="/localcache/rebuild">
+#   <button type="submit">
+#     Rebuild Cache<br>
+#     <small>Last: <%= $pretty %></small>
+#   </button>
+# </form>

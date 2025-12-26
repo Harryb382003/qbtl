@@ -10,8 +10,8 @@
     <a href="/">Home</a>
     <a href="/qbt/hashnames">QBT hash-names</a>
     <a href="/qbt/repairable">Repairable</a>
-    <a href="/torrents">Torrents</a>
-    <a href="/qbt/add_one">Add one</a>
+    <a href="/torrents">Page View</a>
+    <a href="/qbt/add_one">Single View</a>
     % if (stash('dev_mode')) {
       % my $ts = stash('local_cache_mtime') // app->defaults->{local_cache_mtime} // 0;
       % my $label = $ts ? scalar(localtime($ts)) : 'never';
