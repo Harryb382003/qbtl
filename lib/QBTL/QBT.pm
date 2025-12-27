@@ -178,4 +178,100 @@ sub pause_hash {
   return 1;
 }
 
+# ------------------------------
+# Torrent contents (files)
+# ------------------------------
+
+sub torrent_files {
+  my ($self, $hash) = @_;
+  die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-f]{40}$/;
+
+  my $url = "$self->{base_url}/api/v2/torrents/files?hash=$hash";
+  my $res = $self->{ua}->get($url);
+  die "torrent_files failed: " . $res->status_line unless $res->is_success;
+
+  my $arr = decode_json($res->decoded_content);
+  return $arr;    # arrayref of { name => "path/inside/torrent", ... }
+}
+
+# ------------------------------
+# Rename (must be paused; do before recheck)
+# ------------------------------
+sub rename_folder {
+  my ($self, $hash, $old_path, $new_path) = @_;
+  die "bad hash"         unless defined($hash)     && $hash =~ /^[0-9a-f]{40}$/;
+  die "missing old_path" unless defined($old_path) && length($old_path);
+  die "missing new_path" unless defined($new_path) && length($new_path);
+
+  require HTTP::Request::Common;
+
+  my $req = HTTP::Request::Common::POST(
+         "$self->{base_url}/api/v2/torrents/renameFolder",
+         Content_Type => 'application/x-www-form-urlencoded',
+         Content => [hash => $hash, oldPath => $old_path, newPath => $new_path],
+  );
+
+  my $res = $self->{ua}->request($req);
+
+  # API often returns 200 even on “no-op”/some failures; keep body for debug
+  my $res = $self->{ua}->request($req);
+
+  my $out = {ok   => ($res->is_success ? 1 : 0),
+             code => ($res->code            // 0),
+             body => ($res->decoded_content // ''),};
+
+  return $out unless $out->{ok};
+
+  # ---- verify rename actually applied (qbt may 200 with no-op) ----
+  my $files =
+      eval { $self->torrent_files($hash) };    # you need this helper; see below
+  if ($@ || ref($files) ne 'ARRAY')
+  {
+    $out->{ok}   = 0;
+    $out->{body} = "renameFolder verify failed: " . ($@ ? $@ : "no file list");
+    return $out;
+  }
+
+  my $want_prefix = "$new_path/";
+  my $saw_new     = 0;
+  for my $f (@$files)
+  {
+    next unless ref($f) eq 'HASH';
+    my $p = $f->{name} // $f->{path} // '';
+    next unless length $p;
+    if (index($p, $want_prefix) == 0 || $p eq $new_path) { $saw_new = 1; last; }
+  }
+
+  if (!$saw_new)
+  {
+    $out->{ok} = 0;
+    $out->{body} =
+        "renameFolder verify: did not see paths under '$want_prefix'";
+  }
+
+  return $out;
+}
+
+sub rename_file {
+  my ($self, $hash, $old_path, $new_path) = @_;
+  die "bad hash"         unless defined($hash)     && $hash =~ /^[0-9a-f]{40}$/;
+  die "missing old_path" unless defined($old_path) && length($old_path);
+  die "missing new_path" unless defined($new_path) && length($new_path);
+
+  require HTTP::Request::Common;
+
+  my $req = HTTP::Request::Common::POST(
+         "$self->{base_url}/api/v2/torrents/renameFile",
+         Content_Type => 'application/x-www-form-urlencoded',
+         Content => [hash => $hash, oldPath => $old_path, newPath => $new_path],
+  );
+
+  my $res = $self->{ua}->request($req);
+
+  return {ok   => ($res->is_success ? 1 : 0),
+          code => ($res->code            // 0),
+          body => ($res->decoded_content // ''),};
+  return 1;
+}
+
 1;

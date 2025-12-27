@@ -3,8 +3,8 @@
 
 % my $picked    = stash('picked');          # { hash, source_path }
 % my $err       = stash('error') // '';
-% my $notice    = stash('notice') // '';
-% my $return_to = param('return_to') // stash('return_to') // '';
+% my $notice = flash('notice') // stash('notice') // '';
+% my $return_to = param('return_to') // stash('return_to') // '/torrents';
 
 <h1>Add one missing torrent</h1>
 
@@ -20,40 +20,26 @@
   <p><b>Picked infohash:</b> <code><%= $picked->{hash} %></code></p>
   <p><b>Local .torrent:</b> <%= $picked->{source_path} %></p>
 
-  <!-- ADD: POST (never nest another form inside this) -->
+  <!-- ADD: POST -->
   <form method="post" action="/qbt/add_one" style="margin-top:10px;">
     <input type="hidden" name="hash" value="<%= $picked->{hash} %>">
     <input type="hidden" name="source_path" value="<%= $picked->{source_path} %>">
-% if ($return_to) {
     <input type="hidden" name="return_to" value="<%= $return_to %>">
-% }
+
     <label>
       <input type="checkbox" name="confirm" value="1">
       Add this torrent to qBittorrent
     </label>
+
     <div style="margin-top:10px;">
       <button type="submit">Add</button>
     </div>
   </form>
-
-  <!-- OK: GET (acknowledge and leave this screen) -->
-  <form method="get" action="/qbt/add_one" style="margin-top:10px;">
-  <input type="hidden" name="ok" value="1">
-% if ($return_to) {
-    <input type="hidden" name="return_to" value="<%= $return_to %>">
-% }
-    <button type="submit">OK</button>
-  </form>
-
 % } else {
   <p>No missing torrents found.</p>
-
-  <!-- OK here just returns to caller if present, else stays on add_one -->
-  <form method="get" action="/qbt/add_one" style="margin-top:10px;">
-% if ($return_to) {
-    <input type="hidden" name="return_to" value="<%= $return_to %>">
-% }
-    <button type="submit">OK</button>
-  </form>
 % }
 
+<!-- OK: always leave/return -->
+<form method="get" action="<%= $return_to %>" style="margin-top:10px;">
+  <button type="submit">OK</button>
+</form>
