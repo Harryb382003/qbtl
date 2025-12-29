@@ -1,4 +1,4 @@
-package Utils;
+package QBTL::Utils;
 
 use common::sense;
 use Data::Dumper;
@@ -16,15 +16,14 @@ use POSIX                qw(strftime);
 use Time::HiRes          qw(gettimeofday tv_interval);
 use Unicode::Normalize   qw(NFC NFD);
 
-use lib 'lib';
-use Logger;
+use QBTL::Logger;
 
-use Exporter 'import';
-our @EXPORT_OK = qw(
-  human_bytes
-  start_timer
-  stop_timer
-);
+# use Exporter 'import';
+# our @EXPORT_OK = qw(
+#     human_bytes
+#     start_timer
+#     stop_timer
+# );
 
 #                     dump_hash_to_disk
 #                     start_timer
@@ -38,48 +37,49 @@ our @EXPORT_OK = qw(
 #                     queue_count
 
 sub _decode_utf8_safe {
-  my ($s) = @_;
+  my ( $s ) = @_;
   return '' unless defined $s;
-  return $s if utf8::is_utf8($s);
-  my $out = eval { Encode::decode('UTF-8', $s, 1) };
-  return defined($out) ? $out : $s;
+  return $s if utf8::is_utf8( $s );
+  my $out = eval { Encode::decode( 'UTF-8', $s, 1 ) };
+  return defined( $out ) ? $out : $s;
 }
 
 sub _name_variants_for_spotlight {
-  my ($name) = @_;
+  my ( $name ) = @_;
   return () unless defined $name && length $name;
 
   my @v;
   push @v, $name;
-  push @v, NFC($name), NFD($name);
+  push @v, NFC( $name ), NFD( $name );
 
   # If the name contains “smart dashes”, also try plain hyphen variants.
-  for my $dash ("\x{2010}", "\x{2011}", "\x{2012}", "\x{2013}",
-                "\x{2014}", "\x{2212}")
+  for my $dash (
+                 "\x{2010}", "\x{2011}", "\x{2012}", "\x{2013}",
+                 "\x{2014}", "\x{2212}" )
   {
-    next unless index($name, $dash) >= 0;
-    (my $h = $name) =~ s/\Q$dash\E/-/g;
-    push @v, $h, NFC($h), NFD($h);
+    next unless index( $name, $dash ) >= 0;
+    ( my $h = $name ) =~ s/\Q$dash\E/-/g;
+    push @v, $h, NFC( $h ), NFD( $h );
   }
 
   # Dedup, preserve order
   my %seen;
-  @v = grep { defined($_) && length($_) && !$seen{$_}++ } @v;
+  @v = grep { defined( $_ ) && length( $_ ) && !$seen{$_}++ } @v;
   return @v;
 }
 
 sub human_bytes {
-  my ($bytes, $opts) = @_;
+  my ( $bytes, $opts ) = @_;
 
-  #     warn "[DEBUG] human_bytes opts: " . ($opts->{human_bytes} // 'undef') . "\n";
+#     warn "[DEBUG] human_bytes opts: " . ($opts->{human_bytes} // 'undef') . "\n";
   $opts ||= {};
   return $opts->{human_bytes}
       ? "$bytes bytes"
-      : Number::Bytes::Human::format_bytes($bytes) . "B";
+      : Number::Bytes::Human::format_bytes( $bytes ) . "B";
 }
 
 sub locate_payload_files_named {
-  my ($name, $size_opt) = @_;
+  my ( $name, $size_opt ) = @_;
   return () unless defined $name && length $name;
   return () unless $^O eq 'darwin';
 
@@ -87,25 +87,23 @@ sub locate_payload_files_named {
   chomp $mdfind;
   return () unless $mdfind && -x $mdfind;
 
-  Logger::debug("[files_named] search name=[$name]");
+  QBTL::Logger::debug( "[files_named] search name=[$name]" );
 
   my @hits;
 
   # 1) exact FSName + size (if numeric size given)
-  if (defined $size_opt && $size_opt =~ /^\d+$/)
-  {
+  if ( defined $size_opt && $size_opt =~ /^\d+$/ ) {
     my $q   = qq{kMDItemFSName=="$name" && kMDItemFSSize==$size_opt};
-    my $cmd = "mdfind " . _shq($q) . " 2>/dev/null";
+    my $cmd = "mdfind " . _shq( $q ) . " 2>/dev/null";
     my @out = `$cmd`;
     chomp @out;
 
     # mdfind outputs UTF-8; decode to Perl Unicode (prevents mojibake)
-    @out  = map  { utf8::is_utf8($_) ? $_ : decode('UTF-8', $_) } @out;
+    @out  = map  { utf8::is_utf8( $_ ) ? $_ : decode( 'UTF-8', $_ ) } @out;
     @hits = grep { -f $_ && $_ !~ /\.torrent$/i } @out;
-    if (@hits)
-    {
-      Logger::debug("[files_named] exact+size hit: " . scalar(@hits));
-      Logger::debug("  [cand] $_") for @hits;
+    if ( @hits ) {
+      QBTL::Logger::debug( "[files_named] exact+size hit: " . scalar( @hits ) );
+      QBTL::Logger::debug( "  [cand] $_" ) for @hits;
       return wantarray ? @hits : $hits[0];
     }
   }
@@ -113,80 +111,80 @@ sub locate_payload_files_named {
   # 2) exact FSName (no size)
   {
     my $q   = qq{kMDItemFSName=="$name"};
-    my $cmd = "mdfind " . _shq($q) . " 2>/dev/null";
+    my $cmd = "mdfind " . _shq( $q ) . " 2>/dev/null";
     my @out = `$cmd`;
     chomp @out;
     @hits = grep { -f $_ && $_ !~ /\.torrent$/i } @out;
-    if (@hits)
-    {
-      Logger::debug("[files_named] exact-name hit: " . scalar(@hits));
-      Logger::debug("  [cand] $_") for @hits;
+    if ( @hits ) {
+      QBTL::Logger::debug( "[files_named] exact-name hit: " . scalar( @hits ) );
+      QBTL::Logger::debug( "  [cand] $_" ) for @hits;
       return wantarray ? @hits : $hits[0];
     }
-    else
-    {
-      Logger::debug("[files_named] exact-name miss");
+    else {
+      QBTL::Logger::debug( "[files_named] exact-name miss" );
     }
   }
 
   # 3) glob by name, then rank by extension (videos first, images last)
   {
-    my $cmd = "mdfind -name " . _shq($name) . " 2>/dev/null";
+    my $cmd = "mdfind -name " . _shq( $name ) . " 2>/dev/null";
     my @out;
-    for my $try (_name_variants_for_spotlight($name))
-    {
+    for my $try ( _name_variants_for_spotlight( $name ) ) {
       my $cmd =
             "LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 mdfind -name "
-          . _shq($try)
+          . _shq( $try )
           . " 2>/dev/null";
       @out = `$cmd`;
       chomp @out;
 
       # decode output lines so Kate/web UI don’t show mojibake
-      @out = map { _decode_utf8_safe($_) } @out;
+      @out = map { _decode_utf8_safe( $_ ) } @out;
 
       last if @out;    # stop at first hit set
     }
     @hits = grep { -f $_ && $_ !~ /\.torrent$/i } @out;
 
-    if (@hits)
-    {
-      Logger::debug("[files_named] glob hit: " . scalar(@hits));
-      Logger::debug("  [cand] $_") for @hits;
+    if ( @hits ) {
+      QBTL::Logger::debug( "[files_named] glob hit: " . scalar( @hits ) );
+      QBTL::Logger::debug( "  [cand] $_" ) for @hits;
 
-      my %rank = ((map { $_ => 1 } qw(mp4 mkv mov avi wmv ts m4v mpg mpeg flv)),
-                  (map { $_ => 2 } qw(iso img bin cue nrg)),
-                  (map { $_ => 3 } qw(mp3 flac aac m4a ogg wav)),
-                  (map { $_ => 4 } qw(sub srt idx vob)),
-                  (map { $_ => 5 } qw(jpg jpeg png gif bmp webp heic)),);
+      my %rank = (
+                   (
+                     map { $_ => 1 }
+                         qw(mp4 mkv mov avi wmv ts m4v mpg mpeg flv)
+                   ),
+                   ( map { $_ => 2 } qw(iso img bin cue nrg) ),
+                   ( map { $_ => 3 } qw(mp3 flac aac m4a ogg wav) ),
+                   ( map { $_ => 4 } qw(sub srt idx vob) ),
+                   ( map { $_ => 5 } qw(jpg jpeg png gif bmp webp heic) ), );
 
       my $ext = sub {
-        my ($p) = @_;
+        my ( $p ) = @_;
         return '' unless defined $p;
-        return lc($1) if $p =~ /\.([^.]+)$/;
+        return lc( $1 ) if $p =~ /\.([^.]+)$/;
         return '';
       };
 
       @hits = sort {
-        my $ea = $ext->($a);
-        my $eb = $ext->($b);
+        my $ea = $ext->( $a );
+        my $eb = $ext->( $b );
         my $ra = exists $rank{$ea} ? $rank{$ea} : 50;
         my $rb = exists $rank{$eb} ? $rank{$eb} : 50;
         $ra <=> $rb
       } @hits;
 
-      Logger::debug("[files_named] glob-select $hits[0]") if @hits;
+      QBTL::Logger::debug( "[files_named] glob-select $hits[0]" ) if @hits;
       return wantarray ? @hits : $hits[0];
     }
   }
 
   return ();
 
-  sub _shq { my ($s) = @_; $s //= ''; $s =~ s/'/'"'"'/g; return "'$s'"; }
+  sub _shq { my ( $s ) = @_; $s //= ''; $s =~ s/'/'"'"'/g; return "'$s'"; }
 }
 
 sub normalize_dashes {
-  my ($s) = @_;
+  my ( $s ) = @_;
   return '' unless defined $s;
 
   # Replace common Unicode hyphens/dashes/minus with ASCII hyphen-minus
@@ -201,37 +199,36 @@ sub normalize_dashes {
 my %TIMERS;
 
 sub start_timer {
-  my ($label) = @_;
+  my ( $label ) = @_;
   $TIMERS{$label} = [gettimeofday];    # store arrayref under label
-  Logger::debug("Starting timer: $label") if defined $label;
+  QBTL::Logger::debug( "Starting timer: $label" ) if defined $label;
 }
 
 sub stop_timer {
-  my ($label) = @_;
-  if (exists $TIMERS{$label})
-  {
-    my $elapsed = tv_interval($TIMERS{$label});
-    Logger::debug("Stopped timer: $label after ${elapsed}s") if defined $label;
+  my ( $label ) = @_;
+  if ( exists $TIMERS{$label} ) {
+    my $elapsed = tv_interval( $TIMERS{$label} );
+    QBTL::Logger::debug( "Stopped timer: $label after ${elapsed}s" )
+        if defined $label;
     delete $TIMERS{$label};
     return $elapsed;
   }
-  else
-  {
-    Logger::warn("Timer '$label' not found");
+  else {
+    QBTL::Logger::warn( "Timer '$label' not found" );
     return undef;
   }
 }
 
 sub str2epoch {
-  my ($str) = @_;
+  my ( $str ) = @_;
   return unless $str;
-  return eval { str2time($str) } || 0;
+  return eval { str2time( $str ) } || 0;
 }
 
 sub epoch2str {
-  my ($epoch) = @_;
+  my ( $epoch ) = @_;
   return '' unless defined $epoch && $epoch =~ /^\d+$/;
-  return POSIX::strftime('%Y-%m-%d %H:%M:%S', localtime($epoch));
+  return POSIX::strftime( '%Y-%m-%d %H:%M:%S', localtime( $epoch ) );
 }
 
 #
@@ -294,7 +291,7 @@ sub epoch2str {
 #
 #
 # sub detect_dark_mode {
-# 	Logger::debug("#	detect_dark_mode");
+# 	QBTL::Logger::debug("#	detect_dark_mode");
 #     my ($os) = @_;
 #     $os ||= test_OS();
 #
@@ -319,7 +316,7 @@ sub epoch2str {
 # sub ensure_dir {
 #
 #     my ($opts, $dir) = @_;
-#     Logger::debug("ENSURING DIRECTORY: " . $dir);
+#     QBTL::Logger::debug("ENSURING DIRECTORY: " . $dir);
 #     my $cwd = getcwd();
 #
 #     # Absolute if it starts with /
@@ -331,7 +328,7 @@ sub epoch2str {
 #
 #     # Remember where it landed
 #     $opts->{$dir} = $create;
-#     Logger::debug($opts->{$dir} . " VERIFIED");
+#     QBTL::Logger::debug($opts->{$dir} . " VERIFIED");
 #
 # }
 #
@@ -406,7 +403,7 @@ sub epoch2str {
 # }
 #
 # sub normalize {
-#     Logger::info("\nStarting normalization...");
+#     QBTL::Logger::info("\nStarting normalization...");
 #     my $opts = @_;
 #     return unless exists $opts->{normalize};
 #
@@ -418,7 +415,7 @@ sub epoch2str {
 #     }
 #     elsif ($mode eq '0') {
 #         $opts->{normalize} = 0;        # explicit off
-#         Logger::info("Normalization disabled (--normalize = 0)");
+#         QBTL::Logger::info("Normalization disabled (--normalize = 0)");
 #     }
 #     else {
 #         die "Invalid --normalize value: $mode\n"
@@ -489,7 +486,7 @@ sub epoch2str {
 #     # if both a & m given, prefer manual (be conservative)
 #     if ($has_auto && $has_manual) {
 #         $has_auto = 0;
-#         Logger::warn("[chunk] both 'a' and 'm' provided; using manual prompt (m)");
+#         QBTL::Logger::warn("[chunk] both 'a' and 'm' provided; using manual prompt (m)");
 #     }
 #
 #     return ($n, $has_auto, $has_manual);
@@ -500,7 +497,7 @@ sub epoch2str {
 #     $count ||= 5;
 #
 #     unless (ref($data) eq 'HASH' || ref($data) eq 'ARRAY') {
-#         Logger::warn("[Utils] chunk() called with non-reference data");
+#         QBTL::Logger::warn("[Utils] chunk() called with non-reference data");
 #         return $data;
 #     }
 #
@@ -564,7 +561,7 @@ sub epoch2str {
 #     $name //= '';
 #
 #     # Debug: show classification and a few sample paths
-#     Logger::debug("\n[classify] name = [$name] files_count = "
+#     QBTL::Logger::debug("\n[classify] name = [$name] files_count = "
 #         . scalar(@$files)
 #         . " has_slash = $has_slash is_multi = $is_multi");
 #     my $sample = join(" | ", map {
@@ -577,7 +574,7 @@ sub epoch2str {
 #                                     ? $#$files
 #                                     : 2)]
 #                                 ]});
-#     Logger::debug("[classify] sample_paths: $sample");
+#     QBTL::Logger::debug("[classify] sample_paths: $sample");
 #
 #     my (@missing, @mismatched, @tested);
 #     my ($zeros, $present) = (0, 0);
@@ -587,9 +584,9 @@ sub epoch2str {
 #         if ($is_multi) {
 #             # ---- MULTI-FILE: directories only (do NOT fall back to files) ----
 #             my @dirs = locate_payload_dirs_named($name);
-#             Logger::debug("[trace:dir] multi lookup name=[$name] dir_hits=".scalar(@dirs));
+#             QBTL::Logger::debug("[trace:dir] multi lookup name=[$name] dir_hits=".scalar(@dirs));
 #             $hit_path = $dirs[0] if @dirs;
-#             Logger::info(__LINE__ . " [PAYLOAD] resolve name = [$name] hit_path=" . (
+#             QBTL::Logger::info(__LINE__ . " [PAYLOAD] resolve name = [$name] hit_path=" . (
 #                 defined $hit_path
 #                     ? $hit_path
 #                     : '(none)'
@@ -597,7 +594,7 @@ sub epoch2str {
 #             );
 #
 #             unless (defined $hit_path && length $hit_path) {
-#                 Logger::warn("[PAYLOAD] skip reason = missing-files tested = " . (length $name ? $name : "(undef)"));
+#  QBTL::Logger::warn("[PAYLOAD] skip reason = missing-files tested = " . (length $name ? $name:"(undef)"));
 #                 return {
 #                     ok      => 0,
 #                     reason  => "missing-files",
@@ -619,13 +616,13 @@ sub epoch2str {
 #             if (@$files == 1 && ref($files->[0]) eq 'HASH') { $expected_size = $files->[0]{length}; }
 #             my ($file_hit) = locate_payload_files_named($base, $expected_size);
 #             $hit_path = $file_hit if defined $file_hit;
-#             Logger::info("[PAYLOAD] resolve name = [$base] hit_path=" . (defined $hit_path ? $hit_path : '(none)'));
+# QBTL::Logger::info("[PAYLOAD] resolve name = [$base] hit_path=" . (defined $hit_path ? $hit_path : '(none)'));
 #         }
 #     }
 #
 #     # ---- if nothing resolved, skip ----
 #     unless (defined $hit_path && length $hit_path) {
-#         Logger::warn("[PAYLOAD] skip reason=missing-files tested=$name");
+#         QBTL::Logger::warn("[PAYLOAD] skip reason=missing-files tested=$name");
 #         return {
 #             ok      => 0,
 #             reason  => "missing-files",
@@ -686,7 +683,7 @@ sub epoch2str {
 #         }
 #     }
 #
-#     Logger::info("[PAYLOAD] ok found_path = $hit_path");
+#     QBTL::Logger::info("[PAYLOAD] ok found_path = $hit_path");
 #     $metadata->{resolved_path} = $hit_path;
 #
 #     return {
@@ -758,12 +755,12 @@ sub epoch2str {
 #
 #     # If the token looks like a filename (has .ext and no slash), skip dir search
 #     if ($name !~ m{/} && $name =~ m/\.[^\/.]{1,10}$/) {
-#         Logger::debug("[dirs_named] looks-like-file name=[$name] → skip dir search");
+#         QBTL::Logger::debug("[dirs_named] looks-like-file name=[$name] → skip dir search");
 #         return ();
 #     }
 #
 #     start_timer("find_payload");
-#     Logger::debug("\n#\tlocate_payload_dirs_named");
+#     QBTL::Logger::debug("\n#\tlocate_payload_dirs_named");
 #
 #     my @dirs;
 #
@@ -774,11 +771,11 @@ sub epoch2str {
 #         my @out = `$cmd`; chomp @out;
 #         @dirs = grep { -d $_ } @out;
 #         if (@dirs) {
-#             Logger::info("[MAIN] Located " . scalar(@dirs) . " dirs for '$name'");
+#             QBTL::Logger::info("[MAIN] Located " . scalar(@dirs) . " dirs for '$name'");
 #             stop_timer("find_payload");
 #             return @dirs;
 #         } else {
-#             Logger::debug("[dirs_named] exact-name miss for [$name]");
+#             QBTL::Logger::debug("[dirs_named] exact-name miss for [$name]");
 #         }
 #     }
 #
@@ -789,15 +786,15 @@ sub epoch2str {
 #         @dirs = grep { -d $_ } @out;
 #
 #         if (@dirs) {
-#             Logger::debug("[dirs_named] glob hit: ".scalar(@dirs));
-#             Logger::debug("  [dir] $_") for @dirs;
-#             Logger::info("[MAIN] Located " . scalar(@dirs) . " dirs for '$name'");
+#             QBTL::Logger::debug("[dirs_named] glob hit: ".scalar(@dirs));
+#             QBTL::Logger::debug("  [dir] $_") for @dirs;
+#             QBTL::Logger::info("[MAIN] Located " . scalar(@dirs) . " dirs for '$name'");
 #             stop_timer("find_payload");
 #             return @dirs;
 #         }
 #     }
 #
-#     Logger::info("[MAIN] Located 0 dirs for '$name'");
+#     QBTL::Logger::info("[MAIN] Located 0 dirs for '$name'");
 #     stop_timer("find_payload");
 #     return ();
 #
@@ -854,10 +851,10 @@ sub epoch2str {
 #     }
 #
 #     if (move($torrent_path, $dest)) {
-#         Logger::summary("[SKIP→TEMP] $base reason=" . ($why // 'unspecified') . " → $dest");
+#         QBTL::Logger::summary("[SKIP→TEMP] $base reason=" . ($why // 'unspecified') . " → $dest");
 #         return 1;
 #     } else {
-#         Logger::warn("[SKIP→TEMP][FAILED] $base reason=" . ($why // 'unspecified') . " err=$!");
+#         QBTL::Logger::warn("[SKIP→TEMP][FAILED] $base reason=" . ($why // 'unspecified') . " err=$!");
 #         return 0;
 #     }
 # }
@@ -1037,13 +1034,13 @@ sub epoch2str {
 #         if (@files > $max_cache) {
 #             my @old = @files[$max_cache .. $#files];
 #             unlink @old;
-#             Logger::info("[CACHE] Cleaned up ".scalar(@old)." old '$type' caches");
+#             QBTL::Logger::info("[CACHE] Cleaned up ".scalar(@old)." old '$type' caches");
 #         }
 #
-#         Logger::info("[CACHE] Wrote '$type' cache ($record_count entries) -> $cache_file");
+#         QBTL::Logger::info("[CACHE] Wrote '$type' cache ($record_count entries) -> $cache_file");
 #     };
 #     if ($@) {
-#         Logger::error("[CACHE] Failed to write '$type' cache: $@");
+#         QBTL::Logger::error("[CACHE] Failed to write '$type' cache: $@");
 #     }
 # }
 #
@@ -1052,7 +1049,7 @@ sub epoch2str {
 #     my $file = "cache/cache_${type}_latest.json";
 #
 #     unless (-e $file) {
-#         Logger::warn("[CACHE] No '$type' cache file found");
+#         QBTL::Logger::warn("[CACHE] No '$type' cache file found");
 #         return (undef, $file, "not_found");
 #     }
 #
@@ -1075,7 +1072,7 @@ sub epoch2str {
 #     my $got      = sha1_hex($json_text);
 #
 #     if ($expected ne $got) {
-#         Logger::error("[CACHE] Digest mismatch for '$type' cache ($file)\n".
+#         QBTL::Logger::error("[CACHE] Digest mismatch for '$type' cache ($file)\n".
 #                       " expected=$expected\n got     =$got");
 #         return (undef, $file, "digest_mismatch");
 #     }
@@ -1086,7 +1083,7 @@ sub epoch2str {
 # sub _purge_cache_files {
 #     my ($type, $latest_file) = @_;
 #
-#     Logger::warn("[CACHE] Purging unreadable '$type' cache");
+#     QBTL::Logger::warn("[CACHE] Purging unreadable '$type' cache");
 #     unlink $latest_file if -e $latest_file;
 #
 #     # Kill timestamped siblings too
@@ -1108,7 +1105,7 @@ sub epoch2str {
 #     return unless -e $file_path;
 #
 #     open my $fh, '<:raw', $file_path or do {
-#         Logger::error("[ERROR] Cannot open $file_path: $!");
+#         QBTL::Logger::error("[ERROR] Cannot open $file_path: $!");
 #         return;
 #     };
 #
@@ -1118,7 +1115,7 @@ sub epoch2str {
 #
 #     my $decoded;
 #     eval { $decoded = Bencode::bdecode($data); 1 }
-#         or Logger::error("[ERROR] Failed to bdecode $file_path: $@");
+#         or QBTL::Logger::error("[ERROR] Failed to bdecode $file_path: $@");
 #
 # #    sprinkle("bdecode_" . basename($file_path), $decoded) if $decoded;
 #
@@ -1168,7 +1165,7 @@ sub epoch2str {
 #     $opts ||= {};
 #
 #     unless (defined $query && length $query) {
-#         Logger::warn("[WARN] run_mdfind called with no query");
+#         QBTL::Logger::warn("[WARN] run_mdfind called with no query");
 #         return [];
 #     }
 #
@@ -1176,12 +1173,12 @@ sub epoch2str {
 #     my $stderr_redirect = $opts->{debug_mdfind} ? '' : ' 2>/dev/null';
 #
 #     my $cmd = sprintf('mdfind %s%s', shell_quote($query), $stderr_redirect);
-#     Logger::debug("[DEBUG] Running Spotlight query: $cmd");
+#     QBTL::Logger::debug("[DEBUG] Running Spotlight query: $cmd");
 #
 #     my @results = `$cmd`;
 #     chomp @results;
 #
-#     Logger::info("[INFO] mdfind returned " . scalar(@results) . " results for query: $query");
+#     QBTL::Logger::info("[INFO] mdfind returned " . scalar(@results) . " results for query: $query");
 #     return \@results;
 # }
 #

@@ -3,275 +3,373 @@ use common::sense;
 use HTTP::Cookies;
 use LWP::UserAgent;
 
-use Mojo::JSON qw(decode_json);
+use Mojo::JSON qw( decode_json );
 
-#use QBittorrent;   # legacy bootstrap only
+use QBTL::Logger;
+
+# ------------------------------
+# Constructor / Auth
+# ------------------------------
 
 sub new {
-  Logger::debug("#	new");
-  my ($class, $opts) = @_;
-  my $self = {base_url => $opts->{base_url} || 'http://localhost:8080',
-              username => $opts->{username} || 'admin',
-              password => $opts->{password} || 'adminadmin',
-              ua       => LWP::UserAgent->new(cookie_jar => HTTP::Cookies->new),
+  QBTL::Logger::debug( "#\tnew" );
+  my ( $class, $opts ) = @_;
+
+  my $self = {
+              base_url     => $opts->{base_url}     || 'http://localhost:8080',
+              username     => $opts->{username}     || 'admin',
+              password     => $opts->{password}     || 'adminadmin',
+              die_on_error => $opts->{die_on_error} || 0,
+              ua => LWP::UserAgent->new( cookie_jar => HTTP::Cookies->new ),
               %$opts,};
+
   bless $self, $class;
-  $self->_login;
+
+  my $ok = $self->_api_auth_login;
+  die $ok->{err} unless $ok->{ok};
+
   return $self;
 }
 
-sub _login {
-  Logger::debug("#	_login");
+sub _api_auth_login {
+  QBTL::Logger::debug( "#\t_api_auth_login" );
   my $self = shift;
-  my $res = $self->{ua}->post("$self->{base_url}/api/v2/auth/login",
-                              {username => $self->{username},
-                               password => $self->{password}
-                              });
 
-  die "Login failed: " . $res->status_line unless $res->is_success;
+  my $res = $self->{ua}->post(
+                               "$self->{base_url}/api/v2/auth/login",
+                               {
+                                username => $self->{username},
+                                password => $self->{password},
+                               } );
+
+  return
+      $self->_fail(
+                    "auth/login failed: " . $res->status_line,
+                    {
+                     ok   => 0,
+                     code => ( $res->code            // 0 ),
+                     body => ( $res->decoded_content // '' ),
+                    }
+      ) unless $res->is_success;
+
+  return {ok => 1, code => ( $res->code // 200 ), body => ''};
 }
 
 # ------------------------------
-# Read
+# Helpers (validation / transport)
 # ------------------------------
 
-sub get_torrents_info {
-  my ($self, %args) = @_;
+sub _validate_hash {
+  my ( undef, $hash ) = @_;
+  die "bad hash" unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
+  return 1;
+}
 
-  my $url = "$self->{base_url}/api/v2/torrents/info";
+sub _validate_hashes_pipe {
+  my ( undef, $hashes ) = @_;
+  die "bad hashes" unless defined $hashes && length $hashes;
 
-  # Optional filter: hashes => '40hex' or '40hex|40hex|...'
-  if (defined $args{hashes} && length $args{hashes})
-  {
-    my $h = $args{hashes};
-    $h =~ s/\s+//g;
+  my $h = $hashes;
+  $h =~ s/\s+//g;
 
-    # canonical: lower-hex only (fail loudly if anything else shows up)
-    die "bad hashes" unless $h =~ /^[0-9a-f]{40}(?:\|[0-9a-f]{40})*$/;
+  die "bad hashes" unless $h =~ /^[0-9a-f]{40}(?:\|[0-9a-f]{40})*$/;
+  return $h;
+}
 
-    $url .= "?hashes=$h";
+sub _fail {
+  my ( $self, $msg, $out ) = @_;
+  $out ||= {ok => 0};
+
+  $out->{ok}  = 0    unless defined $out->{ok};
+  $out->{err} = $msg unless defined $out->{err} && length $out->{err};
+
+  die $msg if $self->{die_on_error};
+  return $out;
+}
+
+sub _api_post_form {
+  my ( $self, $path, $form_href ) = @_;
+  die "missing path" unless defined $path && length $path;
+
+  my $url = "$self->{base_url}$path";
+  my $res = $self->{ua}->post( $url, $form_href || {} );
+
+  return
+      $self->_fail(
+                    "POST failed: $path: " . $res->status_line,
+                    {
+                     ok   => 0,
+                     code => ( $res->code            // 0 ),
+                     body => ( $res->decoded_content // '' ),
+                    }
+      ) unless $res->is_success;
+
+  return {
+          ok   => 1,
+          code => ( $res->code            // 200 ),
+          body => ( $res->decoded_content // '' ),};
+}
+
+sub _api_get_json {
+  my ( $self, $path ) = @_;
+  die "missing path" unless defined $path && length $path;
+
+  my $url = "$self->{base_url}$path";
+  my $res = $self->{ua}->get( $url );
+
+  return
+      $self->_fail(
+                    "GET failed: $path: " . $res->status_line,
+                    {
+                     ok   => 0,
+                     code => ( $res->code            // 0 ),
+                     body => ( $res->decoded_content // '' ),
+                    }
+      ) unless $res->is_success;
+
+  my $decoded = eval { decode_json( $res->decoded_content ) };
+  return
+      $self->_fail(
+                    "GET failed: $path: JSON decode error: $@",
+                    {
+                     ok   => 0,
+                     code => ( $res->code            // 0 ),
+                     body => ( $res->decoded_content // '' ),
+                    }
+      ) if $@;
+
+  return {ok => 1, code => ( $res->code // 200 ), json => $decoded};
+}
+
+sub _api_torrents_add__multipart {
+  my ( $self, $torrent_path, $savepath ) = @_;
+
+  die "missing torrent_path"
+      unless defined $torrent_path && length $torrent_path;
+  die "torrent not found" unless -f $torrent_path;
+
+  open my $fh, '<', $torrent_path or die "open $torrent_path: $!";
+  binmode $fh;
+
+  my %form = ( torrents => [ $fh, $torrent_path ] );
+
+  if ( defined $savepath && length $savepath ) {
+    $form{savepath} = $savepath;    # qBittorrent field name
   }
 
-  my $res = $self->{ua}->get($url);
-  die "Failed to get torrents: " . $res->status_line unless $res->is_success;
+  my $res = $self->{ua}->post(
+                               "$self->{base_url}/api/v2/torrents/add",
+                               Content_Type => 'form-data',
+                               Content      => \%form, );
 
-  my $torrents = decode_json($res->decoded_content);
-  return $torrents;    # arrayref of hashrefs
+  close $fh;
+
+  return
+      $self->_fail(
+                    "POST failed: /api/v2/torrents/add: " . $res->status_line,
+                    {
+                     ok   => 0,
+                     code => ( $res->code            // 0 ),
+                     body => ( $res->decoded_content // '' ),
+                    }
+      ) unless $res->is_success;
+
+  return {
+          ok   => 1,
+          code => ( $res->code            // 200 ),
+          body => ( $res->decoded_content // '' ),};
 }
 
-sub torrent_info_one {
-  my ($self, $hash) = @_;
-  die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-f]{40}$/;
+# ------------------------------
+# API (Read)
+# ------------------------------
 
-  my $arr = $self->get_torrents_info(hashes => $hash);
-  return {} unless ref($arr) eq 'ARRAY' && @$arr && ref($arr->[0]) eq 'HASH';
+sub api_torrents_info {
+  my ( $self, %args ) = @_;
+
+  my $path = "/api/v2/torrents/info";
+
+  if ( defined $args{hashes} && length $args{hashes} ) {
+    my $h = $self->_validate_hashes_pipe( $args{hashes} );
+    $path .= "?hashes=$h";
+  }
+
+  my $out = $self->_api_get_json( $path );
+  return $out unless $out->{ok};
+
+  return $out->{json};    # arrayref of hashrefs
+}
+
+sub api_torrents_info_one {
+  my ( $self, $hash ) = @_;
+  $self->_validate_hash( $hash );
+
+  my $arr = $self->api_torrents_info( hashes => $hash );
+  return {} unless ref $arr eq 'ARRAY' && @$arr && ref $arr->[0] eq 'HASH';
+
   return $arr->[0];
 }
 
-sub torrent_exists {
-  my ($self, $hash) = @_;
-  my $t = $self->torrent_info_one($hash);
-  return (ref($t) eq 'HASH' && ($t->{hash} // '') =~ /^[0-9a-f]{40}$/) ? 1 : 0;
+sub api_torrents_files {
+  my ( $self, $hash ) = @_;
+  $self->_validate_hash( $hash );
+
+  my $out = $self->_api_get_json( "/api/v2/torrents/files?hash=$hash" );
+  return $out unless $out->{ok};
+
+  return $out->{json};    # arrayref of file hashes
 }
 
-sub get_torrents_infohash {
-  my ($self) = @_;
+sub api_torrents_infohash_map {
+  my ( $self ) = @_;
 
-  my $list = $self->get_torrents_info() || [];
+  my $list = $self->api_torrents_info() || [];
   my %by_ih;
 
-  for my $t (@$list)
-  {
-    next if ref($t) ne 'HASH';
-    my $h = $t->{hash} // '';
+  for my $t ( @$list ) {
+    next if ref $t ne 'HASH';
 
-    # canonical: lower-hex only
+    my $h = $t->{hash} // '';
     next unless $h =~ /^[0-9a-f]{40}$/;
 
     $by_ih{$h} = $t;
   }
 
-  return \%by_ih;    # { infohash => {...} }
+  return \%by_ih;
 }
 
 # ------------------------------
-# Actions
+# Convenience (non-API)
 # ------------------------------
 
-sub add_torrent_file {
-  my ($self, $torrent_path, $savepath) = @_;
+sub _torrent_exists__via_api_torrents_info_one {
+  my ( $self, $hash ) = @_;
+  my $t = $self->api_torrents_info_one( $hash );
 
-  require HTTP::Request::Common;
-
-  my @content = (torrents => [$torrent_path]);
-
-  # qBittorrent expects the field name "savepath"
-  if (defined $savepath && length $savepath)
-  {
-    push @content, (savepath => $savepath);
-  }
-
-  my $req = HTTP::Request::Common::POST("$self->{base_url}/api/v2/torrents/add",
-                                        Content_Type => 'form-data',
-                                        Content      => \@content,);
-
-  my $res = $self->{ua}->request($req);
-
-  return {ok   => ($res->is_success ? 1 : 0),
-          code => ($res->code            // 0),
-          body => ($res->decoded_content // ''),};
-}
-
-sub recheck_hash {
-  my ($self, $hash) = @_;
-  die "bad hash" unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
-
-  require HTTP::Request::Common;
-
-  my $req = HTTP::Request::Common::POST(
-                            "$self->{base_url}/api/v2/torrents/recheck",
-                            Content_Type => 'application/x-www-form-urlencoded',
-                            Content      => [hashes => $hash],);
-
-  my $res = $self->{ua}->request($req);
-
-  die "Failed to recheck: "
-      . $res->status_line
-      . " body="
-      . ($res->decoded_content // '')
-      unless $res->is_success;
-
-  return 1;
-}
-
-sub resume_hash {
-  my ($self, $hash) = @_;
-  die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-f]{40}$/;
-
-  my $res =
-      $self->{ua}
-      ->post("$self->{base_url}/api/v2/torrents/resume", {hashes => $hash},);
-
-  die "Failed to resume: "
-      . $res->status_line
-      . " body="
-      . ($res->decoded_content // '')
-      unless $res->is_success;
-
-  return 1;
-}
-
-sub pause_hash {
-  my ($self, $hash) = @_;
-  die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-f]{40}$/;
-
-  my $res =
-      $self->{ua}
-      ->post("$self->{base_url}/api/v2/torrents/pause", {hashes => $hash},);
-
-  die "Failed to pause: "
-      . $res->status_line
-      . " body="
-      . ($res->decoded_content // '')
-      unless $res->is_success;
-
-  return 1;
+  return ( ref $t eq 'HASH' && ( $t->{hash} // '' ) =~ /^[0-9a-f]{40}$/ )
+      ? 1
+      : 0;
 }
 
 # ------------------------------
-# Torrent contents (files)
+# API (Actions)
 # ------------------------------
 
-sub torrent_files {
-  my ($self, $hash) = @_;
-  die "bad hash" unless defined($hash) && $hash =~ /^[0-9a-f]{40}$/;
-
-  my $url = "$self->{base_url}/api/v2/torrents/files?hash=$hash";
-  my $res = $self->{ua}->get($url);
-  die "torrent_files failed: " . $res->status_line unless $res->is_success;
-
-  my $arr = decode_json($res->decoded_content);
-  return $arr;    # arrayref of { name => "path/inside/torrent", ... }
+sub api_torrents_add {
+  my ( $self, $torrent_path, $savepath ) = @_;
+  return $self->_api_torrents_add__multipart( $torrent_path, $savepath );
 }
 
-# ------------------------------
-# Rename (must be paused; do before recheck)
-# ------------------------------
-sub rename_folder {
-  my ($self, $hash, $old_path, $new_path) = @_;
-  die "bad hash"         unless defined($hash)     && $hash =~ /^[0-9a-f]{40}$/;
-  die "missing old_path" unless defined($old_path) && length($old_path);
-  die "missing new_path" unless defined($new_path) && length($new_path);
+sub api_torrents_recheck {
+  my ( $self, $hash ) = @_;
+  $self->_validate_hash( $hash );
 
-  require HTTP::Request::Common;
+  return $self->_api_post_form( '/api/v2/torrents/recheck',
+                                {hashes => $hash}, );
+}
 
-  my $req = HTTP::Request::Common::POST(
-         "$self->{base_url}/api/v2/torrents/renameFolder",
-         Content_Type => 'application/x-www-form-urlencoded',
-         Content => [hash => $hash, oldPath => $old_path, newPath => $new_path],
-  );
+sub api_torrents_setLocation {
+  my ( $self, $hash, $location ) = @_;
+  $self->_validate_hash( $hash );
+  die "missing location" unless defined $location && length $location;
 
-  my $res = $self->{ua}->request($req);
+  return
+      $self->_api_post_form( '/api/v2/torrents/setLocation',
+                             {hashes => $hash, location => $location}, );
+}
 
-  # API often returns 200 even on “no-op”/some failures; keep body for debug
-  my $res = $self->{ua}->request($req);
+sub api_torrents_setDownloadPath {
+  my ( $self, $hash, $downloadPath ) = @_;
+  $self->_validate_hash( $hash );
+  die "missing downloadPath"
+      unless defined $downloadPath && length $downloadPath;
 
-  my $out = {ok   => ($res->is_success ? 1 : 0),
-             code => ($res->code            // 0),
-             body => ($res->decoded_content // ''),};
+  return
+      $self->_api_post_form(
+                             '/api/v2/torrents/setDownloadPath',
+                             {
+                              hashes       => $hash,
+                              downloadPath => $downloadPath
+                             }, );
+}
+
+sub api_torrents_pause {
+  my ( $self, $hash ) = @_;
+  $self->_validate_hash( $hash );
+
+  return $self->_api_post_form( '/api/v2/torrents/pause', {hashes => $hash}, );
+}
+
+sub api_torrents_resume {
+  my ( $self, $hash ) = @_;
+  $self->_validate_hash( $hash );
+
+  return $self->_api_post_form( '/api/v2/torrents/resume', {hashes => $hash}, );
+}
+
+sub api_torrents_renameFolder {
+  my ( $self, $hash, $oldPath, $newPath ) = @_;
+  $self->_validate_hash( $hash );
+
+  die "missing oldPath" unless defined $oldPath && length $oldPath;
+  die "missing newPath" unless defined $newPath && length $newPath;
+
+  my $out = $self->_api_post_form(
+                                   '/api/v2/torrents/renameFolder',
+                                   {
+                                    hash    => $hash,
+                                    oldPath => $oldPath,
+                                    newPath => $newPath
+                                   }, );
 
   return $out unless $out->{ok};
 
-  # ---- verify rename actually applied (qbt may 200 with no-op) ----
-  my $files =
-      eval { $self->torrent_files($hash) };    # you need this helper; see below
-  if ($@ || ref($files) ne 'ARRAY')
-  {
-    $out->{ok}   = 0;
-    $out->{body} = "renameFolder verify failed: " . ($@ ? $@ : "no file list");
-    return $out;
+  my $files = eval { $self->api_torrents_files( $hash ) };
+  if ( $@ || ref $files ne 'ARRAY' ) {
+    return
+        $self->_fail(
+                  "renameFolder verify failed: " . ( $@ ? $@ : "no file list" ),
+                  $out, );
   }
 
-  my $want_prefix = "$new_path/";
+  my $want_prefix = "$newPath/";
   my $saw_new     = 0;
-  for my $f (@$files)
-  {
-    next unless ref($f) eq 'HASH';
+
+  for my $f ( @$files ) {
+    next unless ref $f eq 'HASH';
     my $p = $f->{name} // $f->{path} // '';
     next unless length $p;
-    if (index($p, $want_prefix) == 0 || $p eq $new_path) { $saw_new = 1; last; }
+    if ( index( $p, $want_prefix ) == 0 || $p eq $newPath ) {
+      $saw_new = 1;
+      last;
+    }
   }
 
-  if (!$saw_new)
-  {
-    $out->{ok} = 0;
-    $out->{body} =
-        "renameFolder verify: did not see paths under '$want_prefix'";
+  unless ( $saw_new ) {
+    return
+        $self->_fail(
+                  "renameFolder verify: did not see paths under '$want_prefix'",
+                  $out, );
   }
 
   return $out;
 }
 
-sub rename_file {
-  my ($self, $hash, $old_path, $new_path) = @_;
-  die "bad hash"         unless defined($hash)     && $hash =~ /^[0-9a-f]{40}$/;
-  die "missing old_path" unless defined($old_path) && length($old_path);
-  die "missing new_path" unless defined($new_path) && length($new_path);
+sub api_torrents_renameFile {
+  my ( $self, $hash, $oldPath, $newPath ) = @_;
+  $self->_validate_hash( $hash );
 
-  require HTTP::Request::Common;
+  die "missing oldPath" unless defined $oldPath && length $oldPath;
+  die "missing newPath" unless defined $newPath && length $newPath;
 
-  my $req = HTTP::Request::Common::POST(
-         "$self->{base_url}/api/v2/torrents/renameFile",
-         Content_Type => 'application/x-www-form-urlencoded',
-         Content => [hash => $hash, oldPath => $old_path, newPath => $new_path],
-  );
-
-  my $res = $self->{ua}->request($req);
-
-  return {ok   => ($res->is_success ? 1 : 0),
-          code => ($res->code            // 0),
-          body => ($res->decoded_content // ''),};
-  return 1;
+  return
+      $self->_api_post_form(
+                             '/api/v2/torrents/renameFile',
+                             {
+                              hash    => $hash,
+                              oldPath => $oldPath,
+                              newPath => $newPath
+                             }, );
 }
 
 1;

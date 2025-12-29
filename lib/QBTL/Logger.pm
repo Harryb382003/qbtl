@@ -1,4 +1,4 @@
-package Logger;
+package QBTL::Logger;
 
 use common::sense;
 use Data::Dumper;
@@ -6,8 +6,6 @@ use Data::Dumper;
 use Term::ANSIColor;
 use File::Spec;
 use File::Path qw(make_path);
-
-use lib 'lib';
 
 my $log_fh;
 my $log_file;
@@ -18,21 +16,23 @@ our $opts = {};
 my @SUMMARY_BUFFER;
 
 # Define two palettes
-my %color_scheme_light = (INFO    => 'white',
-                          WARN    => 'yellow',
-                          ERROR   => 'red',
-                          DEBUG   => 'cyan',
-                          TRACE   => 'magenta',
-                          SUCCESS => 'green',
-                          DEV     => 'blue',);
+my %color_scheme_light = (
+                           INFO    => 'white',
+                           WARN    => 'yellow',
+                           ERROR   => 'red',
+                           DEBUG   => 'cyan',
+                           TRACE   => 'magenta',
+                           SUCCESS => 'green',
+                           DEV     => 'blue', );
 
-my %color_scheme_dark = (INFO    => 'bright_white',
-                         WARN    => 'bright_yellow',
-                         ERROR   => 'bright_red',
-                         DEBUG   => 'bright_cyan',
-                         TRACE   => 'bright_magenta',
-                         SUCCESS => 'bright_green',
-                         DEV     => 'bright_blue',);
+my %color_scheme_dark = (
+                          INFO    => 'bright_white',
+                          WARN    => 'bright_yellow',
+                          ERROR   => 'bright_red',
+                          DEBUG   => 'bright_cyan',
+                          TRACE   => 'bright_magenta',
+                          SUCCESS => 'bright_green',
+                          DEV     => 'bright_blue', );
 
 my %active_colors;
 my $defer_blank = 0;
@@ -62,63 +62,57 @@ my $defer_blank = 0;
 sub _log {
 
   # ensure a palette even if init() not called yet
-  if (!%active_colors) { %active_colors = %color_scheme_light; }
+  if ( !%active_colors ) { %active_colors = %color_scheme_light; }
 
-  my ($level, @messages) = @_;
+  my ( $level, @messages ) = @_;
   my $timestamp = scalar localtime;
 
   my $color = $active_colors{$level} // 'reset';
 
   # --- verbosity gates (centralized) ---
   # Getopt 'v+' yields: -v=1, -vv=2, -vvv=3, -vvvv=4
-  my $v = ($opts && defined $opts->{verbose}) ? $opts->{verbose} : 0;
+  my $v = ( $opts && defined $opts->{verbose} ) ? $opts->{verbose} : 0;
 
   # DEBUG only with -vvv or higher
-  if ($level eq 'DEBUG' && $v < 3)
-  {
+  if ( $level eq 'DEBUG' && $v < 3 ) {
     return;
   }
 
   # TRACE only with -vvvv
-  if ($level eq 'TRACE' && $v < 4)
-  {
+  if ( $level eq 'TRACE' && $v < 4 ) {
     return;
   }
 
   my $max_lines = 10;
-  for my $msg (@messages)
-  {
+  for my $msg ( @messages ) {
     $msg //= '';
     my $defer_blank = 0;
 
-    while ($msg =~ s/^\n//) { print "\n"; print $log_fh "\n" if $log_fh; }
-    while ($msg =~ s/\n$//) { $defer_blank = 1; }
+    while ( $msg =~ s/^\n// ) { print "\n"; print $log_fh "\n" if $log_fh; }
+    while ( $msg =~ s/\n$// ) { $defer_blank = 1; }
 
-    if ($msg eq '') { print "\n"; print $log_fh "\n" if $log_fh; next; }
+    if ( $msg eq '' ) { print "\n"; print $log_fh "\n" if $log_fh; next; }
 
-    my ($console_msg, $file_msg) = ($msg, $msg);
-    if (ref $msg)
-    {
+    my ( $console_msg, $file_msg ) = ( $msg, $msg );
+    if ( ref $msg ) {
       local $Data::Dumper::Terse    = 1;
       local $Data::Dumper::Indent   = 1;
       local $Data::Dumper::Sortkeys = 1;
-      $console_msg = $file_msg = Dumper($msg);
+      $console_msg = $file_msg = Dumper( $msg );
 
-      if ($v < 3)
-      {
+      if ( $v < 3 ) {
         my @lines = split /\n/, $console_msg;
-        if (@lines > $max_lines)
-        {
+        if ( @lines > $max_lines ) {
           $console_msg =
-              join("\n", @lines[0 .. $max_lines - 1]) . "\n... (truncated)";
+              join( "\n", @lines[ 0 .. $max_lines - 1 ] ) . "\n... (truncated)";
         }
       }
     }
 
-    print color($color) . "[$level] $console_msg" . color('reset') . "\n";
+    print color( $color ) . "[$level] $console_msg" . color( 'reset' ) . "\n";
     print $log_fh "[$timestamp] [$level] $file_msg\n" if $log_fh;
 
-    if ($defer_blank) { print "\n"; print $log_fh "\n" if $log_fh; }
+    if ( $defer_blank ) { print "\n"; print $log_fh "\n" if $log_fh; }
   }
 }
 #
@@ -130,13 +124,13 @@ sub _log {
 # }
 #
 # # Public logging methods
-sub info    { _log("INFO",    @_); }
-sub warn    { _log("WARN",    @_); }
-sub error   { _log("ERROR",   @_); }
-sub debug   { _log("DEBUG",   @_); }    #   if $verbose >= 2; }
-sub trace   { _log("TRACE",   @_); }    #   if $verbose >= 3; }
-sub success { _log("SUCCESS", @_); }
-sub dev     { _log("DEV",     @_); }
+sub info    { _log( "INFO",    @_ ); }
+sub warn    { _log( "WARN",    @_ ); }
+sub error   { _log( "ERROR",   @_ ); }
+sub debug   { _log( "DEBUG",   @_ ); }    #   if $verbose >= 2; }
+sub trace   { _log( "TRACE",   @_ ); }    #   if $verbose >= 3; }
+sub success { _log( "SUCCESS", @_ ); }
+sub dev     { _log( "DEV",     @_ ); }
 
 # #     Logger::debug("#	dev");
 # #     my ($msg) = @_;
@@ -177,7 +171,7 @@ sub dev     { _log("DEV",     @_); }
 
 # --- Summary Buffer ---
 sub summary {
-  my ($msg) = @_;
+  my ( $msg ) = @_;
   push @SUMMARY_BUFFER, $msg;
 }
 
@@ -185,14 +179,11 @@ sub flush_summary {
   return unless @SUMMARY_BUFFER;
 
   print "\n--- Summary ---\n";
-  foreach my $line (@SUMMARY_BUFFER)
-  {
-    if ($line =~ /^\n+/)
-    {
+  foreach my $line ( @SUMMARY_BUFFER ) {
+    if ( $line =~ /^\n+/ ) {
       print "$line\n";
     }
-    else
-    {
+    else {
       print "[SUMMARY] $line\n";
     }
 

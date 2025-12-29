@@ -1,20 +1,17 @@
 package QBTL::Scan;
 use common::sense;
 
-use FindBin qw($Bin);
-use lib "$Bin/../lib";
-use lib "$Bin/../lib/QBTL";
-
-use TorrentParser qw(torrent_paths);
+use QBTL::TorrentParser;
 
 sub run {
-  my (%args) = @_;
+  my ( %args ) = @_;
   my $opts = $args{opts} || {};
 
-  my @torrents = torrent_paths($opts);
+  my @torrents = QBTL::TorrentParser::torrent_paths( $opts );
 
-  return {status   => 'ok',
-          found    => scalar(@torrents),
+  return {
+          status   => 'ok',
+          found    => scalar( @torrents ),
           torrents => \@torrents,};
 }
 

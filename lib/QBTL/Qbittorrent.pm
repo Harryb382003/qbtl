@@ -1,4 +1,4 @@
-package QBittorrent;
+package QBTL::QBittorrent;
 
 # ----------------------------------------------------------------------
 #       This module for for addressing qBittorrent'a API functions
@@ -15,14 +15,12 @@ use LWP::UserAgent;
 use HTTP::Cookies;
 use HTTP::Request::Common qw(POST);
 
-
-use lib 'lib/';
-use Logger;
-use Utils qw(
-    start_timer
-    stop_timer
-    );
-
+# use lib 'lib/';
+# use Logger;
+# use Utils qw(
+#     start_timer
+#     stop_timer
+# );
 
 # sub new {
 # 	Logger::debug("#	new");
@@ -177,7 +175,6 @@ use Utils qw(
 #   return 1;
 # }
 
-
 # sub add_torrent_file_paused {
 #     my ($self, $torrent_path) = @_;
 #
@@ -220,7 +217,6 @@ use Utils qw(
 #     };
 # }
 
-
 # sub recheck_hash {
 #     my ($self, $hash) = @_;
 #
@@ -243,9 +239,6 @@ use Utils qw(
 #     die "Failed to delete: " . $res->status_line unless $res->is_success;
 #     return 1;
 # }
-
-
-
 
 # sub pause_hash {
 #     my ($self, $hash) = @_;
@@ -270,7 +263,6 @@ use Utils qw(
 #     };
 # }
 
-
 #
 #     # --- prune runtime queue: never process quarantined torrents ---
 #     my $before = scalar @pending;
@@ -281,7 +273,6 @@ use Utils qw(
 #             "[TEMP] pruned %d quarantined torrent(s) from pending queue", $removed
 #         ));
 #     };
-
 
 =pod
 #
@@ -524,8 +515,5 @@ sub get_q_zombies {
 
 =cut
 
-
-
 1;
-
 
