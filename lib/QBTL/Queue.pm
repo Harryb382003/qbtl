@@ -150,7 +150,7 @@ sub pump_tick {
   return unless %$jobs;
 
   my $qbt;
-  my $qbt_ok = eval { $qbt = _new_qbt( $opts ); 1 };
+  my $qbt_ok = eval { $qbt = $qbt = QBTL::QBT->new(); 1 };
   if ( !$qbt_ok ) {
     my $err = "$@";
     chomp $err;
@@ -233,24 +233,24 @@ sub pump_tick {
   return;
 }
 
-sub _new_qbt {
-  my ( $opts ) = @_;
-
-  my %o = ( %$opts );
-
-  my $base_url = $o{base_url} || $o{qbt_base_url} || $o{url};
-  my $username = $o{username} || $o{qbt_username};
-  my $password = $o{password} || $o{qbt_password};
-
-  my $qbt = QBTL::QBT->new(
-                            {
-                             base_url     => $base_url,
-                             username     => $username,
-                             password     => $password,
-                             die_on_error => 0,} );
-
-  return $qbt;
-}
+# sub _new_qbt {
+#   my ( $opts ) = @_;
+#
+#   my %o = ( %$opts );
+#
+#   my $base_url = $o{base_url} || $o{qbt_base_url} || $o{url};
+#   my $username = $o{username} || $o{qbt_username};
+#   my $password = $o{password} || $o{qbt_password};
+#
+#   my $qbt = QBTL::QBT->new(
+#                             {
+#                              base_url     => $base_url,
+#                              username     => $username,
+#                              password     => $password,
+#                              die_on_error => 0,} );
+#
+#   return $qbt;
+# }
 
 # ------------------------------
 # Job state helpers
@@ -462,14 +462,21 @@ sub _run_step {
       }
 
       my $r2 = $qbt->api_torrents_setDownloadPath( $ih, $sp );
-      if (    ref( $r2 ) eq 'HASH'
-           && !$r2->{ok}
-           && ( $r2->{code} // 0 ) != 404 )
-      {
-        return (
-           'retry',
-           "recheck: setDownloadPath failed http=$r2->{code} body=[$r2->{body}]"
-        );
+
+      if ( ref( $r2 ) eq 'HASH' && !$r2->{ok} ) {
+        my $code = $r2->{code} // 0;
+
+        # treat as "not supported / not applicable"
+        if ( $code == 404 || $code == 400 ) {
+
+          # ignore and proceed
+        }
+        else {
+          return (
+            'retry',
+"recheck: setDownloadPath failed http=$r2->{code} body=[$r2->{body}]"
+          );
+        }
       }
     }
 

@@ -123,6 +123,39 @@ sub _add_one_note_ok {
   return $rec;
 }
 
+sub _add_one_remove_hash {
+  my ( $app, $ih ) = @_;
+  $ih = ( $ih // '' );
+  return unless $ih =~ /^[0-9a-f]{40}$/;
+
+  my $st  = _add_one_state( $app );
+  my $q   = $st->{queue} || [];
+  my $idx = $st->{idx}   || 0;
+
+  for ( my $i = 0 ; $i < @$q ; $i++ ) {
+    next unless defined $q->[$i];
+    next unless $q->[$i] eq $ih;
+
+    splice( @$q, $i, 1 );
+
+    # if we removed something before the current idx, shift idx left
+    if ( $i < $idx ) {
+      $idx--;
+    }
+
+    last;
+  }
+
+  $idx = 0       if $idx < 0;
+  $idx = 0       if !@$q;
+  $idx = @$q - 1 if @$q && $idx > @$q - 1;
+
+  $st->{idx}   = $idx;
+  $st->{queue} = $q;
+
+  return 1;
+}
+
 sub _add_one_state {
   my ( $app ) = @_;
   $app->defaults->{add_one} ||= {
@@ -134,29 +167,6 @@ sub _add_one_state {
     cache_mtime => 0,    # mtime used when queue was built
   };
   return $app->defaults->{add_one};
-}
-
-sub _add_one_remove_hash {
-  my ( $app, $ih ) = @_;
-  $ih = ( $ih // '' );
-  return unless $ih =~ /^[0-9a-f]{40}$/;
-
-  my $st = _add_one_state( $app );
-  my $q  = $st->{queue} || [];
-
-  for ( my $i = 0 ; $i < @$q ; $i++ ) {
-    next unless defined $q->[$i];
-    next unless $q->[$i] eq $ih;
-
-    splice( @$q, $i, 1 );
-
-    # keep idx valid
-    $st->{idx} = 0 if $st->{idx} >= @$q;
-    last;
-  }
-
-  $st->{queue} = $q;
-  return;
 }
 
 sub _fmt_ts {
@@ -386,7 +396,7 @@ sub _qbt_observer_tick {
 
   my $qbt;
   eval {
-    $qbt = QBTL::QBT->new( opts => $opts );
+    $qbt = QBTL::QBT->new( $opts );
     1;
   } or do {
     my $err = "$@";
@@ -464,7 +474,7 @@ sub _qbt_snapshot {
              $app->defaults->{qbt_by_ih} || {} );
   }
 
-  my $qbt  = QBTL::QBT->new( opts => $opts );
+  my $qbt  = QBTL::QBT->new( $opts );
   my $list = $qbt->api_torrents_info() || [];
 
   my %by;
@@ -670,7 +680,7 @@ sub app {
       my ( $qbt_by_ih, $qbt_list );
       my $qbt_err = '';
       eval {
-        my $qbt = QBTL::QBT->new( opts => {} );
+        my $qbt = QBTL::QBT->new( {} );
         $qbt_by_ih = $qbt->api_torrents_infohash_map();
         $qbt_by_ih = {} if ref( $qbt_by_ih ) ne 'HASH';
         $qbt_list  = $qbt->api_torrents_info() || [];
@@ -812,19 +822,44 @@ sub app {
   $r->get(
     '/qbt/add_one' => sub {
       my $c = shift;
+      $c->app->log->debug(   "add_one ctx method="
+                           . $c->req->method
+                           . " path="
+                           . $c->req->url->path . " ref="
+                           . ( $c->req->headers->referrer // '(none)' )
+                           . " return_to="
+                           . ( $c->param( 'return_to' ) // '(none)' )
+                           . " hash="
+                           . ( $c->param( 'hash' ) // '(none)' ) );
+      $c->app->log->debug( "add_one GET return_to_in="
+                           . ( $c->param( 'return_to' ) // '(none)' ) );
+
+      $c->app->log->debug( "add_one GET return_to_ok="
+                           . ( $c->stash( 'return_to' ) // '(none)' ) );
       $c->stash( dev_mode => ( $opts->{dev_mode} ? 1 : 0 ) );
+
+      my $return_to = $c->param( 'return_to' ) // '';
+
+# allow only local paths; reject absolute URLs and anything with whitespace/newlines
+      if (    $return_to !~ m{\A/}
+           || $return_to =~ m{://}
+           || $return_to =~ m{[\r\n]} )
+      {
+        $return_to = '/qbt/add_one';
+      }
+
+      $c->stash( return_to => $return_to );
 
       # OK click? leave this screen (optionally bump first)
       my $ok = $c->param( 'ok' ) // '';
-      if ( $ok )    # bump semantics,  OK == move on
+      if ( $ok )    # bump semantics, OK == move on
       {
         _add_one_advance( $c->app );
 
-        my $return_to = $c->param( 'return_to' ) // '';
-        $return_to = '/qbt/add_one' unless $return_to =~ m{\A/[\w/\-]*\z};
-        $app->log->debug( "812 Web::add_one queued return_to=$return_to" );
+        $c->app->log->debug( "812 Web::add_one queued return_to=$return_to" );
         return $c->redirect_to( $return_to );
       }
+
       my ( $local_by_ih, $cache_mtime, $cache_src ) =
           QBTL::LocalCache::get_local_by_ih(
                                        root_dir => ( $opts->{root_dir} || '.' ),
@@ -832,7 +867,7 @@ sub app {
       $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
 
       # Pull qbt snapshot ONLY when we need to (queue build / rebuild)
-      my $qbt       = QBTL::QBT->new( opts => {} );
+      my $qbt       = QBTL::QBT->new( {} );
       my $qbt_by_ih = $qbt->api_torrents_infohash_map;
       $qbt_by_ih = {} if ref( $qbt_by_ih ) ne 'HASH';
 
@@ -859,30 +894,38 @@ sub app {
       my $want_hash = $c->param( 'hash' ) // '';
       $want_hash =~ s/\s+//g;
       $want_hash = '' unless $want_hash =~ /^[0-9a-f]{40}$/;
+
       my $pick_hash;
+
       if ( $want_hash ) {
         $pick_hash = $want_hash;
+
         if ( !exists $local_by_ih->{$pick_hash} ) {
           return
               $c->render(
                  template => 'qbt_add_one',
                  error => "Requested hash not found in local cache: $want_hash",
-              );
+                 return_to => $return_to, );
         }
+
         if ( exists $qbt_by_ih->{$pick_hash} ) {
           return
               $c->render(
             template => 'qbt_add_one',
-            error => "Requested hash already exists in qBittorrent: $want_hash",
-              );
+            error    =>
+"Requested hash already exists in qBittorrent: \n\t$pick_hash\n\t$want_hash",
+            return_to => $return_to, );
         }
       }
       else {
-        $pick_hash = $st->{queue}[ $st->{idx} ]
-            if @{$st->{queue} || []};
+        $pick_hash = $st->{queue}[ $st->{idx} ] if @{$st->{queue} || []};
       }
 
-      return $c->render( template => 'qbt_add_one' ) unless $pick_hash;
+      return
+          $c->render(
+                      template  => 'qbt_add_one',
+                      return_to => $return_to,
+          ) unless $pick_hash;
 
       my $rec = $local_by_ih->{$pick_hash};
       my $source_path =
@@ -890,20 +933,24 @@ sub app {
 
       if ( !$source_path ) {
         return
-            $c->render( template => 'qbt_add_one',
+            $c->render(
+                        template => 'qbt_add_one',
                         error => "Picked $pick_hash but no source_path found",
-            );
+                        return_to => $return_to, );
       }
 
       my $meta = _add_one_state( $c->app )->{meta}{$pick_hash} || {};
 
       $c->stash(
-                 picked => {hash => $pick_hash, source_path => $source_path},
+                 picked => {
+                            hash        => $pick_hash,
+                            source_path => $source_path,
+                 },
                  add_one_meta    => $meta,
                  add_one_queue_n =>
                      scalar( @{_add_one_state( $c->app )->{queue} || []} ),
                  add_one_idx => ( _add_one_state( $c->app )->{idx} || 0 ) + 1,
-      );
+                 return_to   => $return_to, );
 
       return $c->render( template => 'qbt_add_one' );
     } );
@@ -924,7 +971,10 @@ sub app {
           $c->render(
                       template => 'qbt_add_one',
                       error    => "bad hash",
-                      picked   => {hash => $hash, source_path => $source_path},
+                      picked   => {
+                                 hash        => $hash,
+                                 source_path => $source_path
+                      },
           ) unless $hash =~ /^[0-9a-f]{40}$/;
 
       my $confirm = $c->param( 'confirm' ) // '';
@@ -935,8 +985,10 @@ sub app {
             $c->render(
                         template => 'qbt_add_one',
                         error    => "confirm required",
-                        picked => {hash => $hash, source_path => $source_path},
-            );
+                        picked   => {
+                                   hash        => $hash,
+                                   source_path => $source_path,
+                        }, );
       }
 
       if ( !$source_path ) {
@@ -944,8 +996,10 @@ sub app {
             $c->render(
                         template => 'qbt_add_one',
                         error    => "missing source_path",
-                        picked => {hash => $hash, source_path => $source_path},
-            );
+                        picked   => {
+                                   hash        => $hash,
+                                   source_path => $source_path,
+                        }, );
       }
 
       # ---------- Runtime overlay for Page View culling ----------
@@ -953,7 +1007,7 @@ sub app {
       $c->app->defaults->{runtime}{processed} ||= {};
       my $processed = $c->app->defaults->{runtime}{processed};
 
-      my $qbt = QBTL::QBT->new( opts => {} );
+      my $qbt = QBTL::QBT->new( {} );
 
 # --- Pre-check: already exists in qBittorrent? (stale queue / already added) ---
       my $exists = eval {
@@ -962,6 +1016,7 @@ sub app {
             ? 1
             : 0;
       };
+
       if ( $@ ) {
         my $err = "$@";
         chomp $err;
@@ -975,6 +1030,11 @@ sub app {
                               last_error => "torrent_exists check failed: $err",
                               source_path => $source_path,};
 
+        _add_one_remove_hash( $c->app, $hash );
+        my $st = _add_one_state( $c->app );
+        $app->log->debug(
+                       "[add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+                           . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -984,6 +1044,15 @@ sub app {
       }
 
       if ( $exists ) {
+
+     # If it's an infohash-as-name torrent, "allow" by routing to the fix action
+        my $t        = $qbt->api_torrents_info_one( $hash );
+        my $qbt_name = ( ref( $t ) eq 'HASH' ) ? ( $t->{name} // '' ) : '';
+
+        if ( length( $qbt_name ) && $qbt_name eq $hash ) {
+          return $c->redirect_to( "/qbt/hashname?hash=$hash" );
+        }
+
         my $msg =
 "Already exists in qBittorrent (stale queue or previously added): $hash";
 
@@ -995,6 +1064,11 @@ sub app {
                                last_error  => $msg,
                                source_path => $source_path,};
 
+        _add_one_remove_hash( $c->app, $hash );
+        my $st = _add_one_state( $c->app );
+        $app->log->debug(
+                       "[add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+                           . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -1022,6 +1096,7 @@ sub app {
       my ( $savepath, $why, $add );
       my $pending_root_rename_data
           ;    # <-- MUST be outside eval so we can pass to Queue
+
       my $ok = eval {
         my $rec = $local_by_ih->{$hash};
         die "no local record for $hash" unless ref( $rec ) eq 'HASH';
@@ -1040,7 +1115,7 @@ sub app {
           next unless defined $ln;
           if ( $ln =~ /\bhit=(.+)\z/ ) {
             $hit_path = $1;
-            $hit_path =~ s/\s+\z//;    # trim end
+            $hit_path =~ s/\s+\z//;
             last;
           }
         }
@@ -1049,7 +1124,6 @@ sub app {
           $hit_path =~ s/\s+\z//;
         }
 
-        # --- DEBUG: prove what hit_path is and whether munge runs ---
         $app->log->debug(
                     "Web::add_one dbg hit_path=" . ( $hit_path || '(empty)' ) );
 
@@ -1092,7 +1166,6 @@ sub app {
             $app->log->debug( "Web::add_one dbg rename_intent=(none)" );
           }
 
-          # commit the results
           if ( ref( $rename_dbg ) eq 'HASH' ) {
             $savepath                 = $munged_save_dbg if $munged_save_dbg;
             $pending_root_rename_data = $rename_dbg;
@@ -1103,16 +1176,17 @@ sub app {
           $app->log->debug(
 "DEBUG: about to call _munge_savepath_and_root_rename hash=$hash hit_path=$hit_path"
           );
+
           ( $savepath, $pending_root_rename_data ) =
               _munge_savepath_and_root_rename(
                                                rec      => $rec,
                                                hit_path => $hit_path,
                                                savepath => $savepath, );
+
           $app->log->debug(
 "DEBUG: about to call _munge_savepath_and_root_rename hash=$hash hit_path=$hit_path"
           );
 
-          # make it visible to Queue enqueue
           if ( ref( $pending_root_rename_data ) eq 'HASH' ) {
             $rec->{pending_root_rename_data} = $pending_root_rename_data;
           }
@@ -1125,42 +1199,6 @@ sub app {
 $pending_root_rename_data->{drivespace_top_lvl}"
             : "" )
               . ( length( $hit_path ) ? " hit=$hit_path" : "" ) );
-        my $hit_path = '';
-        for my $ln ( @sp_dbg ) {
-          if ( defined $ln && $ln =~ /\bhit=([^\s].*)\z/ ) {
-            $hit_path = $1;
-            $hit_path =~ s/\s+\z// if defined $hit_path;
-            last;
-          }
-        }
-
-        my $pending_root_rename_data;
-
-        if ( $hit_path ) {
-          $app->log->debug(
-"DEBUG: about to call _munge_savepath_and_root_rename hash=$hash hit_path=$hit_path"
-          );
-          ( $savepath, $pending_root_rename_data ) =
-              _munge_savepath_and_root_rename(
-                                               rec      => $rec,
-                                               hit_path => $hit_path,
-                                               savepath => $savepath, );
-          $app->log->debug(
-"DEBUG: about to call _munge_savepath_and_root_rename hash=$hash hit_path=$hit_path"
-          );
-
-         # Optional: stash it onto the record so the pending-queue code finds it
-          if ( ref( $pending_root_rename_data ) eq 'HASH' ) {
-            $rec->{pending_root_rename_data} = $pending_root_rename_data;
-          }
-        }
-
-        $app->log->debug(
-          "Web::add_one savepath_final=$savepath why=$why" . (
-            ref( $pending_root_rename_data ) eq 'HASH'
-            ? " rename_root $pending_root_rename_data->{torrent_top_lvl} ->
-$pending_root_rename_data->{drivespace_top_lvl}"
-            : "" ) );
 
         $add = $qbt->api_torrents_add( $source_path, $savepath );
         die "add returned non-hash" unless ref( $add ) eq 'HASH';
@@ -1182,6 +1220,11 @@ $pending_root_rename_data->{drivespace_top_lvl}"
                                source_path => $source_path,
                                savepath    => ( $savepath || '' ),};
 
+        _add_one_remove_hash( $c->app, $hash );
+        my $st = _add_one_state( $c->app );
+        $app->log->debug(
+                       "[add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+                           . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -1206,6 +1249,11 @@ $pending_root_rename_data->{drivespace_top_lvl}"
                                source_path => $source_path,
                                savepath    => ( $savepath || '' ),};
 
+        _add_one_remove_hash( $c->app, $hash );
+        my $st = _add_one_state( $c->app );
+        $app->log->debug(
+                       "[add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+                           . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -1225,6 +1273,11 @@ $pending_root_rename_data->{drivespace_top_lvl}"
                                source_path => $source_path,
                                savepath    => ( $savepath || '' ),};
 
+        _add_one_remove_hash( $c->app, $hash );
+        my $st = _add_one_state( $c->app );
+        $app->log->debug(
+                       "[add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+                           . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -1241,6 +1294,7 @@ $pending_root_rename_data->{drivespace_top_lvl}"
       {
         $pending_root_rename_data = $rec->{pending_root_rename_data};
       }
+
       my $rr_dbg = '(none)';
       if (    ref( $rec ) eq 'HASH'
            && ref( $rec->{pending_root_rename_data} ) eq 'HASH' )
@@ -1251,6 +1305,7 @@ $pending_root_rename_data->{drivespace_top_lvl}"
       }
 
       $app->log->debug( "Web::add_one rename_intent=$rr_dbg" );
+
       QBTL::Queue->enqueue_add_one(
                           $c->app, $hash,
                           source_path              => $source_path,
@@ -1258,7 +1313,6 @@ $pending_root_rename_data->{drivespace_top_lvl}"
                           pending_root_rename_data => $pending_root_rename_data,
       );
 
-      # cull from Page View immediately
       $processed->{$hash} = {
                              status      => 'pending',
                              ts          => time,
@@ -1267,12 +1321,21 @@ $pending_root_rename_data->{drivespace_top_lvl}"
                              savepath    => ( $savepath || '' ),};
 
       _add_one_remove_hash( $c->app, $hash );
-
-      # qbt snapshot is now stale; force refresh next /torrents render
+      my $st = _add_one_state( $c->app );
+      $app->log->debug(
+                       "[add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+                           . scalar( @{$st->{queue} || []} ) );
       $c->app->defaults->{qbt_snap_ts} = 0;
 
       my $return_to = $c->param( 'return_to' ) // '';
-      $return_to = '/qbt/add_one' unless $return_to =~ m{\A/[\w/\-]*\z};
+
+      if (    $return_to !~ m{\A/}
+           || $return_to =~ m{://}
+           || $return_to =~ m{[\r\n]} )
+      {
+        $return_to = '/qbt/add_one';
+      }
+
       $app->log->debug(
                      "1149 Web::add_one queued ih=$hash return_to=$return_to" );
       return $c->redirect_to( $return_to );
@@ -1284,10 +1347,10 @@ $pending_root_rename_data->{drivespace_top_lvl}"
      my $c = shift;
      $c->stash( dev_mode => ( $opts->{dev_mode} ? 1 : 0 ) );
 
-     my $mode = $c->param( 'mode' ) // 'scroll';
-     $mode = ( $mode eq 'paginate' ) ? 'paginate' : 'scroll';
+     my $mode = $c->param( 'mode' ) // '';
+     $mode = ( $mode eq 'scroll' ) ? 'scroll' : 'paginate';
 
-     my $per = int( $c->param( 'per' ) // 50 );
+     my $per = int( $c->param( 'per' ) // 20 );
      $per = 20  if $per < 20;
      $per = 500 if $per > 500;
 
@@ -1296,6 +1359,10 @@ $pending_root_rename_data->{drivespace_top_lvl}"
 
      my $q = $c->param( 'q' ) // '';
      $q =~ s/^\s+|\s+$//g;
+
+     # show=missing (default) | all
+     my $show = $c->param( 'show' ) // 'missing';
+     $show = ( $show eq 'all' ) ? 'all' : 'missing';
 
      # show=missing (default) | all
      my $show = $c->param( 'show' ) // 'missing';
@@ -1324,8 +1391,8 @@ $pending_root_rename_data->{drivespace_top_lvl}"
      if ( !$c->app->defaults->{qbt_by_ih} || ( time - $snap_ts ) > $snap_ttl ) {
        my $qbt_by_ih = {};
        eval {
-         my $qbt = QBTL::QBT->new( opts => {} );
-         $qbt_by_ih = $qbt->api_torrents_infohash();
+         my $qbt = QBTL::QBT->new( {} );
+         $qbt_by_ih = $qbt->api_torrents_infohash_map;
          $qbt_by_ih = {} if ref( $qbt_by_ih ) ne 'HASH';
          1;
            }

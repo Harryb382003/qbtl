@@ -12,9 +12,24 @@ use QBTL::Logger;
 # ------------------------------
 
 sub new {
-  QBTL::Logger::debug( "#\tnew" );
+  warn "### HIT QBTL::QBT->new ###\n";
   my ( $class, $opts ) = @_;
+  $opts ||= {};
 
+#   my ( $pkg,  $file,  $line,  $sub )  = caller( 0 );
+#   my ( $pkg1, $file1, $line1, $sub1 ) = caller( 1 );
+#
+#   QBTL::Logger::debug(
+#                        sprintf(
+#                                 "[QBT.new] called_from=%s %s:%d base_url_in=%s",
+#                                 ( $sub1  // '(unknown)' ),
+#                                 ( $file1 // '(unknown)' ),
+#                                 ( $line1 // 0 ),
+#                                 (
+#                                   defined $opts && ref( $opts ) eq 'HASH'
+#                                   ? ( $opts->{base_url} // '(undef)' )
+#                                   : '(non-hash opts)'
+#                                 ) ) );
   my $self = {
               base_url     => $opts->{base_url}     || 'http://localhost:8080',
               username     => $opts->{username}     || 'admin',
@@ -26,8 +41,7 @@ sub new {
   bless $self, $class;
 
   my $ok = $self->_api_auth_login;
-  die $ok->{err} unless $ok->{ok};
-
+  unless ( $ok->{ok} ) { die $ok->{err}; }
   return $self;
 }
 
@@ -143,40 +157,26 @@ sub _api_get_json {
 
 sub _api_torrents_add__multipart {
   my ( $self, $torrent_path, $savepath ) = @_;
-
-  die "missing torrent_path"
-      unless defined $torrent_path && length $torrent_path;
-  die "torrent not found" unless -f $torrent_path;
-
-  open my $fh, '<', $torrent_path or die "open $torrent_path: $!";
-  binmode $fh;
-
-  my %form = ( torrents => [ $fh, $torrent_path ] );
+  unless ( defined $torrent_path && length $torrent_path ) {
+    return $self->_fail( "missing torrent_path" );
+  }
+  unless ( -f $torrent_path ) {
+    return $self->_fail( "torrent not found: $torrent_path" );
+  }
+  my @content = ( torrents => [$torrent_path] );
 
   if ( defined $savepath && length $savepath ) {
-    $form{savepath} = $savepath;    # qBittorrent field name
+    push @content, ( savepath => $savepath );
   }
 
   my $res = $self->{ua}->post(
                                "$self->{base_url}/api/v2/torrents/add",
                                Content_Type => 'form-data',
-                               Content      => \%form, );
-
-  close $fh;
-
-  return
-      $self->_fail(
-                    "POST failed: /api/v2/torrents/add: " . $res->status_line,
-                    {
-                     ok   => 0,
-                     code => ( $res->code            // 0 ),
-                     body => ( $res->decoded_content // '' ),
-                    }
-      ) unless $res->is_success;
+                               Content      => \@content, );
 
   return {
-          ok   => 1,
-          code => ( $res->code            // 200 ),
+          ok   => ( $res->is_success ? 1 : 0 ),
+          code => ( $res->code            // 0 ),
           body => ( $res->decoded_content // '' ),};
 }
 
@@ -202,6 +202,9 @@ sub api_torrents_info {
 
 sub api_torrents_info_one {
   my ( $self, $hash ) = @_;
+  unless ( ref( $self ) && ref( $self ) eq __PACKAGE__ ) {
+    die "api_torrents_info_one called without object";
+  }
   $self->_validate_hash( $hash );
 
   my $arr = $self->api_torrents_info( hashes => $hash );
@@ -242,14 +245,14 @@ sub api_torrents_infohash_map {
 # Convenience (non-API)
 # ------------------------------
 
-sub _torrent_exists__via_api_torrents_info_one {
-  my ( $self, $hash ) = @_;
-  my $t = $self->api_torrents_info_one( $hash );
-
-  return ( ref $t eq 'HASH' && ( $t->{hash} // '' ) =~ /^[0-9a-f]{40}$/ )
-      ? 1
-      : 0;
-}
+# sub _torrent_exists__via_api_torrents_info_one {
+#   my ( $self, $hash ) = @_;
+#   my $t = $self->api_torrents_info_one( $hash );
+#
+#   return ( ref $t eq 'HASH' && ( $t->{hash} // '' ) =~ /^[0-9a-f]{40}$/ )
+#       ? 1
+#       : 0;
+# }
 
 # ------------------------------
 # API (Actions)

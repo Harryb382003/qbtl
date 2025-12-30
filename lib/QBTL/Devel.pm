@@ -51,7 +51,7 @@ sub register_routes {
     '/qbt/presence_check' => sub {
       my $c = shift;
 
-      my $qbt  = QBTL::QBT->new( opts => {} );
+      my $qbt  = QBTL::QBT->new({} );
       my $list = $qbt->get_torrents_info() || [];
 
       my ( $total, $with_hash, $name_is_hash ) = ( 0, 0, 0 );
@@ -122,7 +122,7 @@ sub register_routes {
       if ( $@ ) { return $c->render( json => {error => "scan: $@"} ); }
 
       my $qbt_by_ih = eval {
-        my $qbt = QBTL::QBT->new( opts => $opts2 );
+        my $qbt = QBTL::QBT->new($opts2 );
         my $h   = $qbt->get_torrents_infohash();
         $h = {} if ref( $h ) ne 'HASH';
         $h;
@@ -182,7 +182,7 @@ sub register_routes {
       if ( $@ ) { return $c->render( json => {error => "scan: $@"} ); }
 
       my $qbt_by_ih = eval {
-        my $qbt = QBTL::QBT->new( opts => $opts2 );
+        my $qbt = QBTL::QBT->new($opts2 );
         my $h   = $qbt->get_torrents_infohash();
         $h = {} if ref( $h ) ne 'HASH';
         $h;
@@ -284,7 +284,7 @@ sub register_routes {
     '/qbt_name_is_hash' => sub {
       my $c = shift;
 
-      my $qbt = eval { QBTL::QBT->new( opts => {} ) };
+      my $qbt = eval { QBTL::QBT->new({} ) };
       if ( $@ ) {
         return $c->render( json => {error => "QBTL::QBT->new: $@"} );
       }

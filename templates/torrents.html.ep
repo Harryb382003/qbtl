@@ -1,8 +1,8 @@
 % layout 'main';
 % title 'QBTL - Torrents';
 
-% my $mode   = stash('mode')  // 'scroll';
-% my $per    = stash('per')   // 50;
+% my $mode   = stash('mode')  // 'paginate';
+% my $per    = stash('per')   // 20;
 % my $page   = stash('page')  // 1;
 % my $pages  = stash('pages') // 1;
 % my $q      = stash('q')     // '';
@@ -13,7 +13,6 @@
 % my $human  = stash('human');
 
 <h1>Local torrents (from cache)</h1>
-
 <form method="get" action="/torrents" style="margin: 0 0 12px 0;">
   <label>
     Search:
@@ -80,12 +79,12 @@
         <td>
           % if (stash('dev_mode')) {
             <form method="post" action="/qbt/add_one" style="display:inline; margin:0;">
-              <input type="hidden" name="hash" value="<%= $t->{hash} %>">
-              <input type="hidden" name="source_path" value="<%= $t->{source_path} %>">
-              <input type="hidden" name="confirm" value="1">
-              <input type="hidden" name="return_to" value="/torrents">
-              <button type="submit">Add</button>
-              </form>
+  <input type="hidden" name="hash" value="<%= $t->{hash} %>">
+  <input type="hidden" name="source_path" value="<%= $t->{source_path} %>">
+  <input type="hidden" name="confirm" value="1">
+  <input type="hidden" name="return_to" value="<%= url_for->to_string %>">
+  <button type="submit">Add</button>
+</form>
             % } else {
             <em>dev</em>
           % }
