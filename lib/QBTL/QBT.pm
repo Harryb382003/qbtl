@@ -2,8 +2,9 @@ package QBTL::QBT;
 use common::sense;
 use HTTP::Cookies;
 use LWP::UserAgent;
-
 use Mojo::JSON qw( decode_json );
+use URI;
+use URI::Escape qw(uri_escape_utf8);
 
 use QBTL::Logger;
 
@@ -12,7 +13,8 @@ use QBTL::Logger;
 # ------------------------------
 
 sub new {
-  warn "### HIT QBTL::QBT->new ###\n";
+
+  #  warn "### HIT QBTL::QBT->new ###\n";
   my ( $class, $opts ) = @_;
   $opts ||= {};
 
@@ -105,8 +107,32 @@ sub _api_post_form {
   my ( $self, $path, $form_href ) = @_;
   die "missing path" unless defined $path && length $path;
 
+  $form_href ||= {};
+  die "form must be HASH" if ref( $form_href ) && ref( $form_href ) ne 'HASH';
+
   my $url = "$self->{base_url}$path";
-  my $res = $self->{ua}->post( $url, $form_href || {} );
+
+  # Force deterministic x-www-form-urlencoded encoding
+  my $u = URI->new( $url );
+  $u->query_form( %$form_href );
+
+  my $req = HTTP::Request->new( POST => $u->as_string );
+  $req->header( 'Content-Type' => 'application/x-www-form-urlencoded' );
+
+# NOTE: query_form put params in URL; move them into the body (what qBt expects)
+  my $body = $u->query // '';
+  $u->query( undef );
+  $req->uri( $u );
+  $req->content( $body );
+
+  # Optional exact payload debug
+  if ( $self->{debug_http} ) {
+    warn "[QBTL::QBT] POST $path\n";
+    warn "[QBTL::QBT] url=" . $u->as_string . "\n";
+    warn "[QBTL::QBT] body=$body\n";
+  }
+
+  my $res = $self->{ua}->request( $req );
 
   return
       $self->_fail(
@@ -286,7 +312,7 @@ sub api_torrents_setDownloadPath {
   $self->_validate_hash( $hash );
   die "missing downloadPath"
       unless defined $downloadPath && length $downloadPath;
-
+  say "290\t" . $downloadPath;
   return
       $self->_api_post_form(
                              '/api/v2/torrents/setDownloadPath',

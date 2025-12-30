@@ -9,14 +9,19 @@ use Mojolicious;
 use Mojo::JSON qw(true);
 
 use QBTL::LocalCache;
-
-# use QBTL::Parse;
-# use QBTL::Plan;
 use QBTL::QBT;
 use QBTL::Queue;
-
-# use QBTL::Scan;
 use QBTL::Utils qw( start_timer stop_timer );
+use QBTL::Logger;
+
+QBTL::Logger::enable_disk_logging( path => 'qbtl.log', level => 'debug' );
+
+BEGIN {
+  my $repo_root = File::Spec->catdir( $Bin, '..' );    # bin/.. => repo root
+  my $log_path =
+      File::Spec->catfile( $repo_root, 'qbtl.log' );    # repo_root/qbtl.log
+  QBTL::Logger::enable_disk_logging( path => $log_path, level => 'debug' );
+}
 
 sub _add_one_advance {
   my ( $app ) = @_;
@@ -250,8 +255,6 @@ sub _infohash_from_torrent_file {
   my $info_bencoded = Bencode::bencode( $t->{info} );
   return sha1_hex( $info_bencoded );
 }
-
-use File::Basename qw(dirname basename);
 
 sub _munge_savepath_and_root_rename {
   my ( %args ) = @_;
@@ -611,6 +614,8 @@ sub app {
   my ( $opts ) = @_;
   $opts ||= {};
   my $app = Mojolicious->new;
+  QBTL::Logger::set_log_file( $opts->{log_file} || 'qbtl.log' );
+  $app->log->level( 'debug' );
   $app->log->debug( "[boot] pid=$$" );
   $app->defaults->{dev_mode} = ( $opts->{dev_mode} ? 1 : 0 );
 
@@ -1342,6 +1347,63 @@ $pending_root_rename_data->{drivespace_top_lvl}"
 
     } );
 
+  $r->post(
+    '/qbt/refresh_hashname' => sub {
+      my $c = shift;
+
+      my $qbt = QBTL::QBT->new( {} );
+
+    # simplest: just bounce back to list; list route will re-snapshot qbt anyway
+      return $c->redirect_to( '/qbt/hashnames' );
+    } );
+
+  $r->get(
+    '/qbt/hashnames' => sub {
+      my $c = shift;
+
+      my $qbt = QBTL::QBT->new( {} );
+
+      # pull fresh every time (for now)
+      my $list = $qbt->api_torrents_info() || [];
+      $list = [] if ref( $list ) ne 'ARRAY';
+
+      my @rows;
+      for my $t ( @$list ) {
+        next unless ref( $t ) eq 'HASH';
+
+        my $hash = $t->{hash} // '';
+        my $name = $t->{name} // '';
+        next unless $hash =~ /^[0-9a-f]{40}$/;
+        next
+            unless length( $name ) && $name eq $hash; # only “hashname” torrents
+
+        push @rows,
+            {
+             hash      => $hash,
+             name      => $name,
+             progress  => ( exists $t->{progress} ? $t->{progress} : '' ),
+             save_path => ( $t->{save_path} // '' ),};
+      }
+
+      $c->stash(
+                 mode   => 'all',
+                 found  => scalar( @rows ),
+                 sample => \@rows,
+                 per    => scalar( @rows ), );
+
+      return $c->render( template => 'qbt_hashnames' );
+    } );
+
+  $r->post(
+    '/qbt/refresh_hashnames' => sub {
+      my $c = shift;
+
+      # simplest “refresh” behavior: just invalidate snapshot + bounce back
+      $c->app->defaults->{qbt_snap_ts} = 0;
+
+      return $c->redirect_to( '/qbt/hashnames' );
+    } );
+
   $r->get(    # page view
    '/torrents' => sub {
      my $c = shift;
@@ -1364,10 +1426,6 @@ $pending_root_rename_data->{drivespace_top_lvl}"
      my $show = $c->param( 'show' ) // 'missing';
      $show = ( $show eq 'all' ) ? 'all' : 'missing';
 
-     # show=missing (default) | all
-     my $show = $c->param( 'show' ) // 'missing';
-     $show = ( $show eq 'all' ) ? 'all' : 'missing';
-
 # ---------- Runtime overlay: things we already touched this server run ----------
      $c->app->defaults->{runtime} ||= {};
      $c->app->defaults->{runtime}{processed} ||=
@@ -1385,7 +1443,6 @@ $pending_root_rename_data->{drivespace_top_lvl}"
      $c->stash( local_cache_src   => ( $src   || '' ) );
 
      # ---------- QBT snapshot (cached in memory) ----------
-     # Refresh if missing or older than N seconds.
      my $snap_ttl = 30;
      my $snap_ts  = $c->app->defaults->{qbt_snap_ts} || 0;
      if ( !$c->app->defaults->{qbt_by_ih} || ( time - $snap_ts ) > $snap_ttl ) {
@@ -1397,9 +1454,6 @@ $pending_root_rename_data->{drivespace_top_lvl}"
          1;
            }
            or do {
-
-         # If qbt is unreachable, we keep the previous snapshot if any.
-         # (Page still works; it just can't reliably hide "already in qbt".)
          $qbt_by_ih = $c->app->defaults->{qbt_by_ih} || {};
            };
        $c->app->defaults->{qbt_by_ih}   = $qbt_by_ih;
@@ -1411,37 +1465,33 @@ $pending_root_rename_data->{drivespace_top_lvl}"
      # ---------- Build rows (default: only "missing from qbt") ----------
      my $local_total = 0;
      my $in_qbt      = 0;
-     my $processed   = $c->app->defaults->{runtime}{processed} || {};
+
      my @rows;
      for my $ih ( keys %$local_by_ih ) {
        next unless defined $ih && $ih =~ /^[0-9a-f]{40}$/;
        next if exists $processed->{$ih};
+
        my $rec = $local_by_ih->{$ih};
        next unless ref( $rec ) eq 'HASH';
+
        $local_total++;
+
        my $exists_in_qbt = exists $qbt_by_ih->{$ih} ? 1 : 0;
        $in_qbt++ if $exists_in_qbt;
        next      if ( $show eq 'missing' ) && $exists_in_qbt;
+
        my $source_path = $rec->{source_path} // '';
        my $name        = $rec->{name}        // '';
        my $files       = $rec->{files};
-       my $total_size  = $rec->{total_size};
 
-       if ( !defined $total_size ) {
-         my $sum = 0;
-         if ( ref( $files ) eq 'ARRAY' ) {
-           for my $f ( @$files ) {
-             next unless ref( $f ) eq 'HASH';
-             my $len = $f->{length} // 0;
-             $sum += $len if $len > 0;
-           }
-         }
-         $total_size = $sum;
-       }
+       my $total_size = $rec->{total_size};
+       $total_size = 0 if !defined $total_size;
+
        if ( !$name && $source_path ) {
          ( $name ) = $source_path =~ m{([^/]+)\z};
          $name ||= '';
        }
+
        push @rows,
            {
             hash        => $ih,
@@ -1452,7 +1502,7 @@ $pending_root_rename_data->{drivespace_top_lvl}"
             in_qbt      => $exists_in_qbt,};
      }
 
-     # ---------- Search filter (case-insensitive, no lc()) ----------
+     # ---------- Search filter ----------
      if ( length $q ) {
        my $re = qr/\Q$q\E/i;
        @rows = grep {
@@ -1462,8 +1512,22 @@ $pending_root_rename_data->{drivespace_top_lvl}"
        } @rows;
      }
 
-     # Stable ordering (paginate not chaotic)
-     @rows = sort { ( $a->{name} // '' ) cmp( $b->{name} // '' ) } @rows;
+     # ---------- Sort ----------
+     my $sort = $c->param( 'sort' ) // 'name';
+     $sort = ( $sort eq 'size' ) ? 'size' : 'name';
+
+     # Safety valve: size+scroll forces paginate
+     if ( $sort eq 'size' && $mode eq 'scroll' ) {
+       $mode = 'paginate';
+     }
+
+     if ( $sort eq 'size' ) {
+       @rows = sort { ( $b->{total_size} // 0 ) <=> ( $a->{total_size} // 0 ) }
+           @rows;
+     }
+     else {
+       @rows = sort { ( $a->{name} // '' ) cmp( $b->{name} // '' ) } @rows;
+     }
 
      my $found = scalar( @rows );
 
@@ -1508,7 +1572,6 @@ $pending_root_rename_data->{drivespace_top_lvl}"
        sample  => \@sample,
        human   => $human,
 
-       # extra sanity stats for template/header
        local_total    => $local_total,
        in_qbt_count   => $in_qbt,
        missing_count  => ( $local_total - $in_qbt ),
