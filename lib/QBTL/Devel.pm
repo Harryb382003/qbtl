@@ -51,7 +51,7 @@ sub register_routes {
     '/qbt/presence_check' => sub {
       my $c = shift;
 
-      my $qbt  = QBTL::QBT->new({} );
+      my $qbt  = QBTL::QBT->new( {} );
       my $list = $qbt->get_torrents_info() || [];
 
       my ( $total, $with_hash, $name_is_hash ) = ( 0, 0, 0 );
@@ -122,7 +122,7 @@ sub register_routes {
       if ( $@ ) { return $c->render( json => {error => "scan: $@"} ); }
 
       my $qbt_by_ih = eval {
-        my $qbt = QBTL::QBT->new($opts2 );
+        my $qbt = QBTL::QBT->new( $opts2 );
         my $h   = $qbt->get_torrents_infohash();
         $h = {} if ref( $h ) ne 'HASH';
         $h;
@@ -182,7 +182,7 @@ sub register_routes {
       if ( $@ ) { return $c->render( json => {error => "scan: $@"} ); }
 
       my $qbt_by_ih = eval {
-        my $qbt = QBTL::QBT->new($opts2 );
+        my $qbt = QBTL::QBT->new( $opts2 );
         my $h   = $qbt->get_torrents_infohash();
         $h = {} if ref( $h ) ne 'HASH';
         $h;
@@ -284,7 +284,7 @@ sub register_routes {
     '/qbt_name_is_hash' => sub {
       my $c = shift;
 
-      my $qbt = eval { QBTL::QBT->new({} ) };
+      my $qbt = eval { QBTL::QBT->new( {} ) };
       if ( $@ ) {
         return $c->render( json => {error => "QBTL::QBT->new: $@"} );
       }
@@ -334,7 +334,7 @@ sub register_routes {
       my $app = $c->app;
 
       # show we really restarted
-      $app->log->debug( "[devel] /restart requested pid=$$" );
+      $app->log->debug( __LINE__ . "[Devel] /restart requested pid=$$" );
 
 # --- NUKE ALL RUNTIME STATE (must use $c->app / $app, not a stray $app var) ---
       delete $app->defaults->{jobs};       # Queue.pm jobs
@@ -353,7 +353,7 @@ sub register_routes {
       # Give the browser time to receive the response, then exit.
       Mojo::IOLoop->timer(
         0.15 => sub {
-          $app->log->debug( "[devel] restart -> exiting 42 pid=$$" );
+          $app->log->debug( __LINE__ . "[Devel] restart -> exiting 42 pid=$$" );
           CORE::exit( 42 );
         } );
 

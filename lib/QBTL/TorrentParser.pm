@@ -15,11 +15,7 @@ use JSON;
 use Exporter 'import';
 
 use QBTL::Logger;
-use QBTL::Utils;    # qw(
-
-#     start_timer
-#     stop_timer
-# );
+use QBTL::Utils;
 
 our @EXPORT_OK = qw(
     torrent_paths
@@ -575,60 +571,60 @@ sub process_all_infohashes {
 #   my @queue = $l_parsed->{by_infohash};
 # }
 
-sub _collision_handler {
-  my ( $meta, $opts, $colliders ) = @_;
-  return if !$opts->{normalize};    # skip silently if switch is off
-
-  my $bucket = $meta->{bucket};
-  my $path   = $meta->{source_path};
-  my $base   = basename( $path );
-
-  # init counters once
-  $colliders->{case_study} //= {
-                                authoritative_safe      => 0,
-                                kitchen_sink_safe       => 0,
-                                kitchen_sink_normalized => 0,
-                                kitchen_sink_manual     => 0,
-                                kitchen_sink_missing    => 0,};
-
-  # --- Authoritative buckets (qBittorrent managed) ---
-  if ( $bucket ne 'kitchen_sink' ) {
-    QBTL::Logger::summary(
-                  "[NORMALIZE] Authoritative bucket ($bucket) -> safe: $base" );
-    $colliders->{case_study}{authoritative_safe}++;
-    return "authoritative_safe";
-  }
-
-  # --- Kitchen sink collisions ---
-  if ( -e $path ) {
-    my $normalized = Utils::normalize_filename( $meta, $colliders );
-
-    if ( $normalized ne $path ) {
-      if ( -e $normalized ) {
-        QBTL::Logger::summary(
-"[NORMALIZE] KS collision escalation failed (target exists) -> manual: $normalized"
-        );
-        push @{$colliders->{manual}}, $path;
-        $colliders->{case_study}{kitchen_sink_manual}++;
-        return "kitchen_sink_manual";
-      }
-      QBTL::Logger::summary(
-                  "[NORMALIZE] KS collision normalized: $base -> $normalized" );
-      $colliders->{case_study}{kitchen_sink_normalized}++;
-      return "kitchen_sink_normalized";
-    }
-    else {
-      QBTL::Logger::summary( "[NORMALIZE] KS no collision, safe: $base" );
-      $colliders->{case_study}{kitchen_sink_safe}++;
-      return "kitchen_sink_safe";
-    }
-  }
-
-  QBTL::Logger::summary(
-                       "[NORMALIZE] KS missing source file -> ignored: $base" );
-  $colliders->{case_study}{kitchen_sink_missing}++;
-  return "kitchen_sink_missing";
-}
+# sub _collision_handler {
+#   my ( $meta, $opts, $colliders ) = @_;
+#   return if !$opts->{normalize};    # skip silently if switch is off
+#
+#   my $bucket = $meta->{bucket};
+#   my $path   = $meta->{source_path};
+#   my $base   = basename( $path );
+#
+#   # init counters once
+#   $colliders->{case_study} //= {
+#                                 authoritative_safe      => 0,
+#                                 kitchen_sink_safe       => 0,
+#                                 kitchen_sink_normalized => 0,
+#                                 kitchen_sink_manual     => 0,
+#                                 kitchen_sink_missing    => 0,};
+#
+#   # --- Authoritative buckets (qBittorrent managed) ---
+#   if ( $bucket ne 'kitchen_sink' ) {
+#     QBTL::Logger::summary(
+#                   "[NORMALIZE] Authoritative bucket ($bucket) -> safe: $base" );
+#     $colliders->{case_study}{authoritative_safe}++;
+#     return "authoritative_safe";
+#   }
+#
+#   # --- Kitchen sink collisions ---
+#   if ( -e $path ) {
+#     my $normalized = Utils::normalize_filename( $meta, $colliders );
+#
+#     if ( $normalized ne $path ) {
+#       if ( -e $normalized ) {
+#         QBTL::Logger::summary(
+# "[NORMALIZE] KS collision escalation failed (target exists) -> manual: $normalized"
+#         );
+#         push @{$colliders->{manual}}, $path;
+#         $colliders->{case_study}{kitchen_sink_manual}++;
+#         return "kitchen_sink_manual";
+#       }
+#       QBTL::Logger::summary(
+#                   "[NORMALIZE] KS collision normalized: $base -> $normalized" );
+#       $colliders->{case_study}{kitchen_sink_normalized}++;
+#       return "kitchen_sink_normalized";
+#     }
+#     else {
+#       QBTL::Logger::summary( "[NORMALIZE] KS no collision, safe: $base" );
+#       $colliders->{case_study}{kitchen_sink_safe}++;
+#       return "kitchen_sink_safe";
+#     }
+#   }
+#
+#   QBTL::Logger::summary(
+#                        "[NORMALIZE] KS missing source file -> ignored: $base" );
+#   $colliders->{case_study}{kitchen_sink_missing}++;
+#   return "kitchen_sink_missing";
+# }
 
 # ---------------------------
 #       internal helpers
@@ -665,73 +661,73 @@ sub _sh_single_quote {
   return "'$s'";
 }
 
-sub _normalize_single {
-  my ( $meta, $opts, $stats, $is_coll ) = @_;
-
-  my $old_path     = $meta->{source_path};
-  my $torrent_name = $meta->{name};
-
-  # Prevent double renames
-  return if $meta->{_normalized};
-
-  # --- Always make a safe filename ---
-  my $safe_name = $torrent_name;
-  $safe_name .= ".torrent" unless $safe_name =~ /\.torrent$/i;
-
-  my $dir = dirname( $old_path );
-  my $new_path;
-
-  if ( $is_coll ) {
-
-    # Collision -> tracker/comment prefix
-    my $tracker  = $meta->{tracker}  // '';
-    my $comment  = $meta->{comment}  // '';
-    my $infohash = $meta->{infohash} // '';
-    my $prefixed =
-        _prepend_tracker( $tracker, $comment, $infohash, $safe_name );
-
-    $new_path = "$dir/$prefixed";
-  }
-  else {
-    # Normal singleton
-    $new_path = "$dir/$safe_name";
-  }
-
-  # --- Nothing to do if same ---
-  return if $old_path eq $new_path;
-
-  my $dry_run = $opts->{dry_run};
-
-  if ( $dry_run ) {
-    QBTL::Logger::info(
-"[normalize_filename] Would normalize: \n\t$old_path -> \n\t$new_path (dry-run)"
-    );
-    $stats->{normalize_dry}++;
-    return;
-  }
-
-  # --- Try the actual move ---
-  if ( move( $old_path, $new_path ) ) {
-    $meta->{source_path} = $new_path;
-    $meta->{_normalized} = 1;
-
-    if ( $is_coll ) {
-      $stats->{normalized_coll}++;
-      QBTL::Logger::info(
-"[normalize_filename] COLLIDER normalized: \n\t$old_path -> \n\t$new_path"
-      );
-    }
-    else {
-      $stats->{normalized}++;
-      QBTL::Logger::info(
-            "[normalize_filename] Normalized: \n\t$old_path -> \n\t$new_path" );
-    }
-  }
-  else {
-    QBTL::Logger::warn(
-"[normalize_filename] Failed to normalize:\n\t$old_path ->\n\t$new_path: $!"
-    );
-  }
-}
+# sub _normalize_single {
+#   my ( $meta, $opts, $stats, $is_coll ) = @_;
+#
+#   my $old_path     = $meta->{source_path};
+#   my $torrent_name = $meta->{name};
+#
+#   # Prevent double renames
+#   return if $meta->{_normalized};
+#
+#   # --- Always make a safe filename ---
+#   my $safe_name = $torrent_name;
+#   $safe_name .= ".torrent" unless $safe_name =~ /\.torrent$/i;
+#
+#   my $dir = dirname( $old_path );
+#   my $new_path;
+#
+#   if ( $is_coll ) {
+#
+#     # Collision -> tracker/comment prefix
+#     my $tracker  = $meta->{tracker}  // '';
+#     my $comment  = $meta->{comment}  // '';
+#     my $infohash = $meta->{infohash} // '';
+#     my $prefixed =
+#         _prepend_tracker( $tracker, $comment, $infohash, $safe_name );
+#
+#     $new_path = "$dir/$prefixed";
+#   }
+#   else {
+#     # Normal singleton
+#     $new_path = "$dir/$safe_name";
+#   }
+#
+#   # --- Nothing to do if same ---
+#   return if $old_path eq $new_path;
+#
+#   my $dry_run = $opts->{dry_run};
+#
+#   if ( $dry_run ) {
+#     QBTL::Logger::info(
+# "[normalize_filename] Would normalize: \n\t$old_path -> \n\t$new_path (dry-run)"
+#     );
+#     $stats->{normalize_dry}++;
+#     return;
+#   }
+#
+#   # --- Try the actual move ---
+#   if ( move( $old_path, $new_path ) ) {
+#     $meta->{source_path} = $new_path;
+#     $meta->{_normalized} = 1;
+#
+#     if ( $is_coll ) {
+#       $stats->{normalized_coll}++;
+#       QBTL::Logger::info(
+# "[normalize_filename] COLLIDER normalized: \n\t$old_path -> \n\t$new_path"
+#       );
+#     }
+#     else {
+#       $stats->{normalized}++;
+#       QBTL::Logger::info(
+#             "[normalize_filename] Normalized: \n\t$old_path -> \n\t$new_path" );
+#     }
+#   }
+#   else {
+#     QBTL::Logger::warn(
+# "[normalize_filename] Failed to normalize:\n\t$old_path ->\n\t$new_path: $!"
+#     );
+#   }
+# }
 
 1;

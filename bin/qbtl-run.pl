@@ -11,5 +11,5 @@ while ( 1 ) {
   system( $^X, "bin/qbtl.pl", ( $opts{dev_mode} ? "--dev-mode" : () ) );
   my $exit = $? >> 8;
   last if $exit != 42;    # restart only when server exits 42
-  warn "[qbtl-run] restart requested\n";
+  warn "\n[qbtl-run] restart requested\n\n\n\n\n";
 }

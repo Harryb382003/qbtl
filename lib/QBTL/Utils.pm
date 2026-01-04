@@ -18,12 +18,14 @@ use Unicode::Normalize   qw(NFC NFD);
 
 use QBTL::Logger;
 
-# use Exporter 'import';
-# our @EXPORT_OK = qw(
-#     human_bytes
-#     start_timer
-#     stop_timer
-# );
+use Exporter 'import';
+our @EXPORT_OK = qw(
+    short_ih
+    human_bytes
+    start_timer
+    stop_timer
+    epoch2time
+);
 
 #                     dump_hash_to_disk
 #                     start_timer
@@ -193,6 +195,13 @@ sub normalize_dashes {
   return $s;
 }
 
+sub short_ih {
+  my ( $ih ) = @_;
+  return $ih unless defined $ih && length( $ih ) > 10;
+  $ih =~ s/^(.{4}).*(.{4})$/$1...$2/;
+  return $ih;
+}
+
 # ---------------------------
 # Time and timers
 # ---------------------------
@@ -223,6 +232,12 @@ sub str2epoch {
   my ( $str ) = @_;
   return unless $str;
   return eval { str2time( $str ) } || 0;
+}
+
+sub epoch2time {
+  my ( $epoch ) = @_;
+  return '' unless defined $epoch && $epoch =~ /^\d+$/;
+  return POSIX::strftime( '%H:%M:%S', localtime( $epoch ) );
 }
 
 sub epoch2str {

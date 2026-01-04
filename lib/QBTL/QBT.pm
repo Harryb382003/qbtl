@@ -4,104 +4,13 @@ use HTTP::Cookies;
 use LWP::UserAgent;
 use Mojo::JSON qw( decode_json );
 use URI;
-use URI::Escape qw(uri_escape_utf8);
+use URI::Escape qw(uri_escape uri_escape_utf8);
 
 use QBTL::Logger;
 
 # ------------------------------
-# Constructor / Auth
+# HELPERS
 # ------------------------------
-
-sub new {
-
-  #  warn "### HIT QBTL::QBT->new ###\n";
-  my ( $class, $opts ) = @_;
-  $opts ||= {};
-
-#   my ( $pkg,  $file,  $line,  $sub )  = caller( 0 );
-#   my ( $pkg1, $file1, $line1, $sub1 ) = caller( 1 );
-#
-#   QBTL::Logger::debug(
-#                        sprintf(
-#                                 "[QBT.new] called_from=%s %s:%d base_url_in=%s",
-#                                 ( $sub1  // '(unknown)' ),
-#                                 ( $file1 // '(unknown)' ),
-#                                 ( $line1 // 0 ),
-#                                 (
-#                                   defined $opts && ref( $opts ) eq 'HASH'
-#                                   ? ( $opts->{base_url} // '(undef)' )
-#                                   : '(non-hash opts)'
-#                                 ) ) );
-  my $self = {
-              base_url     => $opts->{base_url}     || 'http://localhost:8080',
-              username     => $opts->{username}     || 'admin',
-              password     => $opts->{password}     || 'adminadmin',
-              die_on_error => $opts->{die_on_error} || 0,
-              ua => LWP::UserAgent->new( cookie_jar => HTTP::Cookies->new ),
-              %$opts,};
-
-  bless $self, $class;
-
-  my $ok = $self->_api_auth_login;
-  unless ( $ok->{ok} ) { die $ok->{err}; }
-  return $self;
-}
-
-sub _api_auth_login {
-  QBTL::Logger::debug( "#\t_api_auth_login" );
-  my $self = shift;
-
-  my $res = $self->{ua}->post(
-                               "$self->{base_url}/api/v2/auth/login",
-                               {
-                                username => $self->{username},
-                                password => $self->{password},
-                               } );
-
-  return
-      $self->_fail(
-                    "auth/login failed: " . $res->status_line,
-                    {
-                     ok   => 0,
-                     code => ( $res->code            // 0 ),
-                     body => ( $res->decoded_content // '' ),
-                    }
-      ) unless $res->is_success;
-
-  return {ok => 1, code => ( $res->code // 200 ), body => ''};
-}
-
-# ------------------------------
-# Helpers (validation / transport)
-# ------------------------------
-
-sub _validate_hash {
-  my ( undef, $hash ) = @_;
-  die "bad hash" unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
-  return 1;
-}
-
-sub _validate_hashes_pipe {
-  my ( undef, $hashes ) = @_;
-  die "bad hashes" unless defined $hashes && length $hashes;
-
-  my $h = $hashes;
-  $h =~ s/\s+//g;
-
-  die "bad hashes" unless $h =~ /^[0-9a-f]{40}(?:\|[0-9a-f]{40})*$/;
-  return $h;
-}
-
-sub _fail {
-  my ( $self, $msg, $out ) = @_;
-  $out ||= {ok => 0};
-
-  $out->{ok}  = 0    unless defined $out->{ok};
-  $out->{err} = $msg unless defined $out->{err} && length $out->{err};
-
-  die $msg if $self->{die_on_error};
-  return $out;
-}
 
 sub _api_post_form {
   my ( $self, $path, $form_href ) = @_;
@@ -112,118 +21,200 @@ sub _api_post_form {
 
   my $url = "$self->{base_url}$path";
 
-  # Force deterministic x-www-form-urlencoded encoding
-  my $u = URI->new( $url );
-  $u->query_form( %$form_href );
+  for my $attempt ( 1 .. 2 ) {
 
-  my $req = HTTP::Request->new( POST => $u->as_string );
-  $req->header( 'Content-Type' => 'application/x-www-form-urlencoded' );
+    # Force deterministic x-www-form-urlencoded encoding
+    my $u = URI->new( $url );
+    $u->query_form( %$form_href );
 
-# NOTE: query_form put params in URL; move them into the body (what qBt expects)
-  my $body = $u->query // '';
-  $u->query( undef );
-  $req->uri( $u );
-  $req->content( $body );
+    my $req = HTTP::Request->new( POST => $u->as_string );
+    $req->header( 'Content-Type' => 'application/x-www-form-urlencoded' );
 
-  # Optional exact payload debug
-  if ( $self->{debug_http} ) {
-    warn "[QBTL::QBT] POST $path\n";
-    warn "[QBTL::QBT] url=" . $u->as_string . "\n";
-    warn "[QBTL::QBT] body=$body\n";
+    # move params from URL into body (what qBt expects)
+    my $body = $u->query // '';
+    $u->query( undef );
+    $req->uri( $u );
+    $req->content( $body );
+
+    if ( $self->{debug_http} ) {
+      warn "[QBTL::QBT] POST $path\n";
+      warn "[QBTL::QBT] url=" . $u->as_string . "\n";
+      warn "[QBTL::QBT] body=$body\n";
+    }
+
+    my $res = $self->{ua}->request( $req );
+
+    # success
+    if ( $res->is_success ) {
+      return {
+              ok   => 1,
+              code => ( $res->code            // 200 ),
+              body => ( $res->decoded_content // '' ),};
+    }
+
+    my $code = $res->code // 0;
+
+    # auth/session died -> login then retry once
+    if ( ( $code == 401 || $code == 403 ) && $attempt == 1 ) {
+      my $login = eval { $self->api_qbt_login() };
+      next if !$@ && ref( $login ) eq 'HASH' && $login->{ok};
+
+      # login failed -> fall through to failure below
+    }
+
+    return
+        $self->_fail(
+                      "POST failed: $path: " . $res->status_line,
+                      {
+                       ok   => 0,
+                       code => ( $res->code            // 0 ),
+                       body => ( $res->decoded_content // '' ),
+                      } );
   }
-
-  my $res = $self->{ua}->request( $req );
-
-  return
-      $self->_fail(
-                    "POST failed: $path: " . $res->status_line,
-                    {
-                     ok   => 0,
-                     code => ( $res->code            // 0 ),
-                     body => ( $res->decoded_content // '' ),
-                    }
-      ) unless $res->is_success;
-
-  return {
-          ok   => 1,
-          code => ( $res->code            // 200 ),
-          body => ( $res->decoded_content // '' ),};
 }
 
-sub _api_get_json {
-  my ( $self, $path ) = @_;
-  die "missing path" unless defined $path && length $path;
+# ------------------------------
+# Constructor / Auth
+# {base_url}/api/v2/auth/
+# ------------------------------
 
-  my $url = "$self->{base_url}$path";
-  my $res = $self->{ua}->get( $url );
+sub new {
 
-  return
-      $self->_fail(
-                    "GET failed: $path: " . $res->status_line,
-                    {
-                     ok   => 0,
-                     code => ( $res->code            // 0 ),
-                     body => ( $res->decoded_content // '' ),
-                    }
-      ) unless $res->is_success;
+  my ( $class, $opts ) = @_;
+  $opts ||= {};
 
-  my $decoded = eval { decode_json( $res->decoded_content ) };
-  return
-      $self->_fail(
-                    "GET failed: $path: JSON decode error: $@",
-                    {
-                     ok   => 0,
-                     code => ( $res->code            // 0 ),
-                     body => ( $res->decoded_content // '' ),
-                    }
-      ) if $@;
+  my $self = {
+              base_url     => $opts->{base_url}     || 'http://localhost:8080',
+              username     => $opts->{username}     || 'admin',
+              password     => $opts->{password}     || 'adminadmin',
+              die_on_error => $opts->{die_on_error} || 0,
+              ua => LWP::UserAgent->new( cookie_jar => HTTP::Cookies->new ),
+              %$opts,};
 
-  return {ok => 1, code => ( $res->code // 200 ), json => $decoded};
+  bless $self, $class;
 }
 
-sub _api_torrents_add__multipart {
-  my ( $self, $torrent_path, $savepath ) = @_;
-  unless ( defined $torrent_path && length $torrent_path ) {
-    return $self->_fail( "missing torrent_path" );
-  }
-  unless ( -f $torrent_path ) {
-    return $self->_fail( "torrent not found: $torrent_path" );
-  }
-  my @content = ( torrents => [$torrent_path] );
-
-  if ( defined $savepath && length $savepath ) {
-    push @content, ( savepath => $savepath );
-  }
+sub api_qbt_login {
+  QBTL::Logger::debug( "#\tapi_qbt_login" );
+  my ( $self ) = shift;
 
   my $res = $self->{ua}->post(
-                               "$self->{base_url}/api/v2/torrents/add",
-                               Content_Type => 'form-data',
-                               Content      => \@content, );
+                               "$self->{base_url}/api/v2/auth/login",
+                               {
+                                username => $self->{username},
+                                password => $self->{password},
+                               } );
 
-  return {
-          ok   => ( $res->is_success ? 1 : 0 ),
-          code => ( $res->code            // 0 ),
-          body => ( $res->decoded_content // '' ),};
+  unless ( $res->is_success ) {
+    return
+        $self->_fail(
+                      "auth/login failed: " . $res->status_line,
+                      {
+                       ok   => 0,
+                       code => ( $res->code            // 0 ),
+                       body => ( $res->decoded_content // '' ),
+                      } );
+  }
+
+  return {ok => 1, code => ( $res->code // 200 ), body => ''};
+}
+
+# ------------------------------
+# qBittorrent appliaction level methods
+# /api/v2/app/
+# referred to as api_qbt_<function> to not confuse it with $app-> stuff leter
+
+# ------------------------------
+sub api_qbt_preferences {
+  my ( $self ) = @_;
+
+  my $url = "$self->{base_url}/api/v2/app/preferences";
+
+  for my $try ( 1 .. 2 ) {
+    my $res = $self->{ua}->get( $url );
+
+    if ( !$res->is_success ) {
+      my $code = $res->code // 0;
+
+      # if session expired/unauthorized, re-login once
+      if ( $try == 1 && ( $code == 401 || $code == 403 ) ) {
+        $self->api_qbt_login();    # should die on failure
+        next;
+      }
+
+      die "qbt GET /app/preferences failed: " . $res->status_line;
+    }
+
+    my $body  = $res->decoded_content // '';
+    my $prefs = eval { decode_json( $body ) };
+    die "qbt GET /app/preferences JSON decode failed: $@"
+        if $@;
+
+    die "qbt GET /app/preferences expected HASH got "
+        . ( ref( $prefs ) || 'SCALAR' )
+        unless ref( $prefs ) eq 'HASH';
+
+    return $prefs;
+  }
+
+  die "unreachable";
 }
 
 # ------------------------------
 # API (Read)
 # ------------------------------
 
+sub api_torrents_delete {
+  my ( $self, $hashes, $deleteFiles ) = @_;
+  die "missing hashes" unless defined $hashes && length $hashes;
+
+  # qBt accepts "true/false", be we're not taking the chance.
+  $deleteFiles = 'false';
+
+  return
+      $self->_api_post_form(
+                             '/api/v2/torrents/delete',
+                             {
+                              hashes      => $hashes,
+                              deleteFiles => $deleteFiles,
+                             } );
+}
+
 sub api_torrents_info {
   my ( $self, %args ) = @_;
 
-  my $path = "/api/v2/torrents/info";
+  my $url = "$self->{base_url}/api/v2/torrents/info";
 
   if ( defined $args{hashes} && length $args{hashes} ) {
     my $h = $self->_validate_hashes_pipe( $args{hashes} );
-    $path .= "?hashes=$h";
+    $url .= "?hashes=" . uri_escape( $h );
   }
 
-  my $out = $self->_api_get_json( $path );
-  return $out unless $out->{ok};
+  for my $try ( 1 .. 2 ) {
+    my $res = $self->{ua}->get( $url );
 
-  return $out->{json};    # arrayref of hashrefs
+    if ( !$res->is_success ) {
+      my $code = $res->code // 0;
+      if ( $try == 1 && ( $code == 401 || $code == 403 ) ) {
+        $self->api_qbt_login();    # should die if it can't fix it
+        next;
+      }
+      die "qbt GET /torrents/info failed: " . $res->status_line;
+    }
+
+    my $body = $res->decoded_content // '';
+    my $list = eval { decode_json( $body ) };
+    die "qbt GET /torrents/info JSON decode failed: $@"
+        if $@;
+
+    die "qbt GET /torrents/info expected ARRAY got "
+        . ( ref( $list ) || 'SCALAR' )
+        unless ref( $list ) eq 'ARRAY';
+
+    return $list;
+  }
+
+  die "unreachable";
 }
 
 sub api_torrents_info_one {
@@ -243,16 +234,74 @@ sub api_torrents_files {
   my ( $self, $hash ) = @_;
   $self->_validate_hash( $hash );
 
-  my $out = $self->_api_get_json( "/api/v2/torrents/files?hash=$hash" );
-  return $out unless $out->{ok};
+  my $url = "$self->{base_url}/api/v2/torrents/files?hash=$hash";
 
-  return $out->{json};    # arrayref of file hashes
+  for my $attempt ( 1 .. 2 ) {
+    my $res = $self->{ua}->get( $url );
+
+    if ( !$res->is_success ) {
+      my $code = $res->code // 0;
+
+      # auth/session died -> login and retry once
+      if ( ( $code == 401 || $code == 403 ) && $attempt == 1 ) {
+        my $ok = eval { $self->api_qbt_login(); 1 };
+        next if $ok;
+      }
+
+      return
+          $self->_fail(
+                        "GET torrents/files failed: " . $res->status_line,
+                        {
+                         ok   => 0,
+                         code => $code,
+                         body => ( $res->decoded_content // '' ),
+                        } );
+    }
+
+    my $json = eval { decode_json( $res->decoded_content ) };
+    if ( $@ ) {
+      return
+          $self->_fail(
+                        "GET torrents/files JSON decode failed: $@",
+                        {
+                         ok   => 0,
+                         code => ( $res->code            // 0 ),
+                         body => ( $res->decoded_content // '' ),
+                        } );
+    }
+
+    if ( ref( $json ) ne 'ARRAY' ) {
+      my $body = $res->decoded_content // '';
+      $body =~ s/\s+/ /g;
+      $body = substr( $body, 0, 160 );
+
+      return
+          $self->_fail(
+                        "GET torrents/files: expected ARRAY got "
+                            . ( ref( $json ) || 'SCALAR' ),
+                        {ok => 0, code => ( $res->code // 0 ), body => $body} );
+    }
+
+    return $json;
+  }
 }
+
+# sub api_torrents_files {
+#   my ( $self, $hash ) = @_;
+#   $self->_validate_hash( $hash );
+#
+#   my $out = $self->_api_get_json( "/api/v2/torrents/files?hash=$hash" );
+#   return $out unless $out->{ok};
+#
+#   return $out->{json};    # arrayref of file hashes
+# }
 
 sub api_torrents_infohash_map {
   my ( $self ) = @_;
 
-  my $list = $self->api_torrents_info() || [];
+  my $list = $self->api_torrents_info();
+  $list = [] unless ref( $list ) eq 'ARRAY';
+
   my %by_ih;
 
   for my $t ( @$list ) {
@@ -312,7 +361,6 @@ sub api_torrents_setDownloadPath {
   $self->_validate_hash( $hash );
   die "missing downloadPath"
       unless defined $downloadPath && length $downloadPath;
-  say "290\t" . $downloadPath;
   return
       $self->_api_post_form(
                              '/api/v2/torrents/setDownloadPath',
@@ -401,4 +449,104 @@ sub api_torrents_renameFile {
                              }, );
 }
 
+sub _validate_hash {
+  my ( undef, $hash ) = @_;
+  die "bad hash" unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
+  return 1;
+}
+
+sub _validate_hashes_pipe {
+  my ( undef, $hashes ) = @_;
+  die "bad hashes" unless defined $hashes && length $hashes;
+
+  my $h = $hashes;
+  $h =~ s/\s+//g;
+
+  die "bad hashes" unless $h =~ /^[0-9a-f]{40}(?:\|[0-9a-f]{40})*$/;
+  return $h;
+}
+
+sub _fail {
+  my ( $self, $msg, $out ) = @_;
+  $out ||= {ok => 0};
+
+  $out->{ok}  = 0    unless defined $out->{ok};
+  $out->{err} = $msg unless defined $out->{err} && length $out->{err};
+
+  die $msg if $self->{die_on_error};
+  return $out;
+}
+
+sub _api_torrents_add__multipart {
+  my ( $self, $torrent_path, $savepath ) = @_;
+  unless ( defined $torrent_path && length $torrent_path ) {
+    return $self->_fail( "missing torrent_path" );
+  }
+  unless ( -f $torrent_path ) {
+    return $self->_fail( "torrent not found: $torrent_path" );
+  }
+  my @content = ( torrents => [$torrent_path] );
+
+  if ( defined $savepath && length $savepath ) {
+    push @content, ( savepath => $savepath );
+  }
+
+  my $res = $self->{ua}->post(
+                               "$self->{base_url}/api/v2/torrents/add",
+                               Content_Type => 'form-data',
+                               Content      => \@content, );
+
+  return {
+          ok   => ( $res->is_success ? 1 : 0 ),
+          code => ( $res->code            // 0 ),
+          body => ( $res->decoded_content // '' ),};
+}
+
 1;
+
+# sub _api_post_form {
+#   my ( $self, $path, $form_href ) = @_;
+#   die "missing path" unless defined $path && length $path;
+#
+#   $form_href ||= {};
+#   die "form must be HASH" if ref( $form_href ) && ref( $form_href ) ne 'HASH';
+#
+#   my $url = "$self->{base_url}$path";
+#
+#   # Force deterministic x-www-form-urlencoded encoding
+#   my $u = URI->new( $url );
+#   $u->query_form( %$form_href );
+#
+#   my $req = HTTP::Request->new( POST => $u->as_string );
+#   $req->header( 'Content-Type' => 'application/x-www-form-urlencoded' );
+#
+# # NOTE: query_form put params in URL; move them into the body (what qBt expects)
+#   my $body = $u->query // '';
+#   $u->query( undef );
+#   $req->uri( $u );
+#   $req->content( $body );
+#
+#   # Optional exact payload debug
+#   if ( $self->{debug_http} ) {
+#     warn "[QBTL::QBT] POST $path\n";
+#     warn "[QBTL::QBT] url=" . $u->as_string . "\n";
+#     warn "[QBTL::QBT] body=$body\n";
+#   }
+#
+#   my $res = $self->{ua}->request( $req );
+#
+#   return
+#       $self->_fail(
+#                     "POST failed: $path: " . $res->status_line,
+#                     {
+#                      ok   => 0,
+#                      code => ( $res->code            // 0 ),
+#                      body => ( $res->decoded_content // '' ),
+#                     }
+#       ) unless $res->is_success;
+#
+#   return {
+#           ok   => 1,
+#           code => ( $res->code            // 200 ),
+#           body => ( $res->decoded_content // '' ),};
+# }

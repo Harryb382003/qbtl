@@ -11,7 +11,11 @@ use Mojo::JSON qw(true);
 use QBTL::LocalCache;
 use QBTL::QBT;
 use QBTL::Queue;
-use QBTL::Utils qw( start_timer stop_timer );
+use QBTL::Utils qw(
+    start_timer
+    stop_timer
+    short_ih
+);
 use QBTL::Logger;
 
 QBTL::Logger::enable_disk_logging( path => 'qbtl.log', level => 'debug' );
@@ -61,20 +65,6 @@ sub _add_one_build_queue {
   return;
 }
 
-sub _add_one_current {
-  my ( $app ) = @_;
-  my $st      = _add_one_state( $app );
-  my $q       = $st->{queue} || [];
-  return undef unless @$q;
-
-  my $i = $st->{idx} || 0;
-  $i         = 0 if $i < 0;
-  $i         = 0 if $i > $#$q;
-  $st->{idx} = $i;
-
-  return $q->[$i];
-}
-
 sub _add_one_mark_fail {
   my ( $app, $ih, $err ) = @_;
   $ih = ( $ih // '' );
@@ -87,45 +77,6 @@ sub _add_one_mark_fail {
   $st->{meta}{$ih}{ts}          = time;
 
   return;
-}
-
-sub _add_one_meta_ref {
-  my ( $app ) = @_;
-  $app->defaults->{add_one_meta} ||= {};
-  return $app->defaults->{add_one_meta};
-}
-
-sub _add_one_note_fail {
-  my ( $app, $hash, $err, %extra ) = @_;
-  return unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
-
-  my $m = _add_one_meta_ref( $app );
-
-  my $rec = ( $m->{$hash} ||= {hash => $hash, retries => 0, fails => 0} );
-
-  $rec->{fails}++;
-  $rec->{failed_once} = 1 if $rec->{fails} >= 1;
-  $rec->{last_error}  = $err // '';
-  $rec->{ts_fail}     = time;
-
-  # optional breadcrumbs, no behavior
-  for my $k ( keys %extra ) { $rec->{$k} = $extra{$k} }
-
-  return $rec;
-}
-
-sub _add_one_note_ok {
-  my ( $app, $hash, %extra ) = @_;
-  return unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
-
-  my $m = _add_one_meta_ref( $app );
-
-  my $rec = ( $m->{$hash} ||= {hash => $hash, retries => 0, fails => 0} );
-  $rec->{ts_ok} = time;
-
-  for my $k ( keys %extra ) { $rec->{$k} = $extra{$k} }
-
-  return $rec;
 }
 
 sub _add_one_remove_hash {
@@ -327,261 +278,6 @@ sub _munge_savepath_and_root_rename {
   return ( $savepath, $pending_root_rename_data );
 }
 
-sub _pending_ref {
-  my ( $app ) = @_;
-  $app->defaults->{pending} ||= {};
-  return $app->defaults->{pending};    # { ih => { ... } }
-}
-
-# sub _pending_enqueue_add_one {
-#   my ($app, $ih, %args) = @_;
-#   die "bad ih" unless defined($ih) && $ih =~ /^[0-9a-f]{40}$/;
-#
-#   # Optional:
-#   # $args{pending_root_rename_data} = { torrent_top_lvl => "...", drivespace_top_lvl => "..." }
-#
-#   my $pending_root_rename_data = $args{pending_root_rename_data};
-#
-#   my $need_root_rename =
-#       (   ref($pending_root_rename_data) eq 'HASH'
-#        && defined($pending_root_rename_data->{torrent_top_lvl})
-#        && length($pending_root_rename_data->{torrent_top_lvl})
-#        && defined($pending_root_rename_data->{drivespace_top_lvl})
-#        && length($pending_root_rename_data->{drivespace_top_lvl})
-#        && $pending_root_rename_data->{torrent_top_lvl} ne
-#        $pending_root_rename_data->{drivespace_top_lvl}) ? 1 : 0;
-#
-#   my $stage =
-#       $need_root_rename
-#       ? 'wait_visible_then_rename'
-#       : 'wait_visible_then_recheck';
-#
-#   _pending_upsert($app, $ih,
-#                   stage                    => $stage,
-#                   attempts                 => 0,
-#                   next_ts                  => time,     # eligible immediately
-#                   last_error               => '',
-#                   pending_root_rename_data =>
-#                   ($need_root_rename ? $pending_root_rename_data : undef),
-#                   savepath    => ($args{savepath}    // ''),
-#                   source_path => ($args{source_path} // ''),);
-#
-#   return;
-# }
-
-sub _pending_upsert {
-  my ( $app, $ih, %patch ) = @_;
-  die "bad ih" unless defined( $ih ) && $ih =~ /^[0-9a-f]{40}$/;
-
-  my $p = _pending_ref( $app );
-  my $t = ( $p->{$ih} ||= {hash => $ih, ts_created => time} );
-
-  $t->{ts_updated} = time;
-
-  for my $k ( keys %patch ) {
-    if ( defined $patch{$k} ) { $t->{$k} = $patch{$k}; }
-    else                      { delete $t->{$k}; }  # optional: keep struct tidy
-  }
-
-  return $t;
-}
-
-sub _qbt_observer_tick {
-  my ( $app, $opts ) = @_;
-  $opts ||= {};
-
-  my $tasks = _tasks_ref( $app );
-  $app->defaults->{observer_last_tick}  = time;
-  $app->defaults->{observer_last_count} = scalar( keys %$tasks );
-  return unless %$tasks;
-
-  $app->log->debug( "[observer] tick: tasks=" . scalar( keys %$tasks ) );
-
-  my $qbt;
-  eval {
-    $qbt = QBTL::QBT->new( $opts );
-    1;
-  } or do {
-    my $err = "$@";
-    chomp $err;
-    for my $hash ( keys %$tasks ) {
-      my $t = $tasks->{$hash};
-      next unless ref( $t ) eq 'HASH';
-      $t->{stage}  = 'fail';
-      $t->{reason} = "observer: QBT init failed: $err";
-      $t->{ts}     = time;
-    }
-    return;
-  };
-  QBTL::Queue->pump_tick( $app, opts => $opts );
-  for my $hash ( keys %$tasks ) {
-    next unless $hash =~ /^[0-9a-f]{40}$/;
-
-    my $arr = eval { $qbt->api_torrents_info( hashes => $hash ) };
-    if ( $@ ) {
-      my $err = "$@";
-      chomp $err;
-      my $t = ( $tasks->{$hash} ||= {hash => $hash} );
-      $t->{stage}  = 'fail';
-      $t->{reason} = "observer: api_torrents_info failed: $err";
-      $t->{ts}     = time;
-      next;
-    }
-
-    if ( !ref( $arr ) || ref( $arr ) ne 'ARRAY' || !@$arr ) {
-      my $t = ( $tasks->{$hash} ||= {hash => $hash} );
-      $t->{stage} = 'new';
-      $t->{ts}    = time;
-      next;
-    }
-
-    my $t0       = $arr->[0];
-    my $state    = ( ref( $t0 ) eq 'HASH' ) ? ( $t0->{state}    // '' ) : '';
-    my $progress = ( ref( $t0 ) eq 'HASH' ) ? ( $t0->{progress} // -1 ) : -1;
-
-    my $t = ( $tasks->{$hash} ||= {hash => $hash} );
-    $t->{last_state}    = $state;
-    $t->{last_progress} = $progress;
-    $t->{ts}            = time;
-
-    if ( $state =~ /^checking/i ) {
-      $app->log->debug(
-                      "[observer] hash=$hash state=$state progress=$progress" );
-      $t->{stage} = 'rechecking';
-      next;
-    }
-
-    if ( defined $progress && $progress > 0 ) {
-      $t->{stage} = 'ready';
-      next;
-    }
-
-    $t->{stage} = 'suspect_zero';
-  }
-
-  return;
-}
-
-sub _qbt_snapshot {
-  my ( $app, $opts, $force ) = @_;
-  $opts  ||= {};
-  $force ||= 0;
-
-  my $ts = $app->defaults->{qbt_ts} || 0;
-
-  # choose your freshness window; 2s is plenty for UI clicks
-  my $fresh_for = 2;
-
-  if ( !$force && $ts && ( time - $ts ) <= $fresh_for ) {
-    return ( $app->defaults->{qbt_list} || [],
-             $app->defaults->{qbt_by_ih} || {} );
-  }
-
-  my $qbt  = QBTL::QBT->new( $opts );
-  my $list = $qbt->api_torrents_info() || [];
-
-  my %by;
-  for my $t ( @$list ) {
-    next if ref( $t ) ne 'HASH';
-    my $h = $t->{hash} // '';
-    next unless $h =~ /^[0-9a-fA-F]{40}$/;
-    $by{lc( $h )} = $t;
-  }
-
-  $app->defaults->{qbt_list}  = $list;
-  $app->defaults->{qbt_by_ih} = \%by;
-  $app->defaults->{qbt_ts}    = time;
-
-  return ( $list, \%by );
-}
-
-sub _shuffle_in_place {
-  my ( $a ) = @_;
-  return $a unless ref( $a ) eq 'ARRAY';
-  for ( my $i = @$a - 1 ; $i > 0 ; $i-- ) {
-    my $j = int( rand( $i + 1 ) );
-    next if $i == $j;
-    @$a[ $i, $j ] = @$a[ $j, $i ];
-  }
-  return $a;
-}
-
-sub _qbt_snapshot_refresh {
-  my ( $app, $qbt ) = @_;
-  my $snap = _qbt_snapshot( $app );
-  my $by   = $qbt->api_torrents_infohash();
-  $by            = {} if ref( $by ) ne 'HASH';
-  $snap->{by_ih} = $by;
-  $snap->{ts}    = time;
-  return $by;
-}
-
-sub _qbt_snapshot_put_one {
-  my ( $app, $hash, $t ) = @_;
-  return unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
-  return unless ref( $t ) eq 'HASH';
-  my $snap = _qbt_snapshot( $app );
-  $snap->{by_ih}{$hash} = $t;
-  $snap->{ts} = time;
-  return;
-}
-
-sub _task_counts {
-  my ( $app ) = @_;
-  my $tasks = _tasks_ref( $app );
-
-  my %counts;
-  for my $hash ( keys %$tasks ) {
-    my $t = $tasks->{$hash};
-    next unless ref( $t ) eq 'HASH';
-    my $stage = $t->{stage} || 'unknown';
-    $counts{$stage}++;
-  }
-
-  my $total = scalar( keys %$tasks );
-  return ( $total, \%counts );
-}
-
-sub _task_fail_items {
-  my ( $app, $limit ) = @_;
-  $limit ||= 200;
-
-  my $tasks = _tasks_ref( $app );
-  my @fails;
-
-  for my $hash ( keys %$tasks ) {
-    my $t = $tasks->{$hash};
-    next unless ref( $t ) eq 'HASH';
-    next unless ( $t->{stage} || '' ) eq 'fail';
-    push @fails, $t;
-  }
-
-  @fails = sort { ( $b->{ts} || 0 ) <=> ( $a->{ts} || 0 ) } @fails;
-
-  @fails = @fails[ 0 .. ( $limit - 1 ) ] if @fails > $limit;
-  return \@fails;
-}
-
-sub _tasks_ref {
-  my ( $app ) = @_;
-  $app->defaults->{tasks} ||= {};
-  return $app->defaults->{tasks};
-}
-
-sub _task_upsert {
-  my ( $app, $hash, %patch ) = @_;
-  $hash = lc( $hash // '' );
-
-  $app->defaults->{tasks} ||= {};
-  my $t =
-      ( $app->defaults->{tasks}{$hash} ||=
-        {hash => $hash, ts_created => time} );
-
-  $t->{ts_updated} = time;
-  @$t{keys %patch} = values %patch;
-
-  return $t;
-}
 
 sub _torrent_top_lvl_from_rec {
   my ( $rec ) = @_;
@@ -616,7 +312,7 @@ sub app {
   my $app = Mojolicious->new;
   QBTL::Logger::set_log_file( $opts->{log_file} || 'qbtl.log' );
   $app->log->level( 'debug' );
-  $app->log->debug( "[boot] pid=$$" );
+  $app->log->debug( __LINE__ . " [Web] pid=$$" );
   $app->defaults->{dev_mode} = ( $opts->{dev_mode} ? 1 : 0 );
 
   my $root = $opts->{root_dir} || '.';
@@ -662,7 +358,9 @@ sub app {
   if ( $opts->{dev_mode} ) {
     require QBTL::Devel;
     QBTL::Devel::register_routes( $app, $opts );    # <-- IMPORTANT
-    $app->log->debug( "QBTL::Devel routes registered" );
+    $app->log->debug(   basename( __FILE__ ) . ":"
+                      . __LINE__
+                      . " [Web] Developer routes registered" );
   }
 
   $r->get(
@@ -861,7 +559,9 @@ sub app {
       {
         _add_one_advance( $c->app );
 
-        $c->app->log->debug( "812 Web::add_one queued return_to=$return_to" );
+        $c->app->log->debug(   basename( __FILE__ ) . ":"
+                             . __LINE__
+                             . " queued return_to=$return_to" );
         return $c->redirect_to( $return_to );
       }
 
@@ -1037,9 +737,9 @@ sub app {
 
         _add_one_remove_hash( $c->app, $hash );
         my $st = _add_one_state( $c->app );
-        $app->log->debug(
-                       "[add_one] after remove ih=$hash idx=$st->{idx} queue_n="
-                           . scalar( @{$st->{queue} || []} ) );
+        $app->log->debug( __LINE__
+              . " [Web] [add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+              . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -1071,9 +771,9 @@ sub app {
 
         _add_one_remove_hash( $c->app, $hash );
         my $st = _add_one_state( $c->app );
-        $app->log->debug(
-                       "[add_one] after remove ih=$hash idx=$st->{idx} queue_n="
-                           . scalar( @{$st->{queue} || []} ) );
+        $app->log->debug( __LINE__
+              . " [Web] [add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+              . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -1086,9 +786,12 @@ sub app {
       my $ih_file = eval { _infohash_from_torrent_file( $source_path ) };
       $ih_file = $@ ? "(ih parse failed: $@)" : $ih_file;
 
-      $app->log->debug(
-"Web::add_one preflight: sz=$sz pick_hash=$hash file_ih=$ih_file path=$source_path"
-      );
+      $app->log->debug(   __LINE__
+                        . " [Web] preflight: size:$sz pick_hash: "
+                        . short_ih( $hash )
+                        . " file_ih: "
+                        . short_ih( $ih_file )
+                        . " path: $source_path" );
 
       require QBTL::SavePath;
 
@@ -1129,13 +832,16 @@ sub app {
           $hit_path =~ s/\s+\z//;
         }
 
-        $app->log->debug(
-                    "Web::add_one dbg hit_path=" . ( $hit_path || '(empty)' ) );
+        $app->log->debug(   basename( __FILE__ ) . ":"
+                          . __LINE__
+                          . " dbg hit_path="
+                          . ( $hit_path || '(empty)' ) );
 
         my $torrent_top_dbg = _torrent_top_lvl_from_rec( $rec );
         my $is_multi_dbg    = _is_multi_file_torrent( $rec ) ? 1 : 0;
-        $app->log->debug(
-"Web::add_one dbg torrent_top_lvl=$torrent_top_dbg is_multi=$is_multi_dbg"
+        $app->log->debug( basename( __FILE__ ) . ":"
+                . __LINE__
+                . " dbg torrent_top_lvl=$torrent_top_dbg is_multi=$is_multi_dbg"
         );
 
         if ( $hit_path ) {
@@ -1143,11 +849,15 @@ sub app {
           my $disk_parent_dir_dbg = dirname( $disk_file_dir_dbg );
           my $disk_root_dbg       = basename( $disk_file_dir_dbg );
 
-          $app->log->debug(
-                          "Web::add_one dbg disk_file_dir=$disk_file_dir_dbg" );
-          $app->log->debug(
-                      "Web::add_one dbg disk_parent_dir=$disk_parent_dir_dbg" );
-          $app->log->debug( "Web::add_one dbg disk_root_name=$disk_root_dbg" );
+          $app->log->debug(   basename( __FILE__ ) . ":"
+                            . __LINE__
+                            . " dbg disk_file_dir=$disk_file_dir_dbg" );
+          $app->log->debug(   basename( __FILE__ ) . ":"
+                            . __LINE__
+                            . " dbg disk_parent_dir=$disk_parent_dir_dbg" );
+          $app->log->debug(   basename( __FILE__ ) . ":"
+                            . __LINE__
+                            . " dbg disk_root_name=$disk_root_dbg" );
 
           my $rename_dbg;
           my $munged_save_dbg;
@@ -1158,17 +868,25 @@ sub app {
                                                hit_path => $hit_path,
                                                savepath => $savepath, );
 
-          $app->log->debug( "Web::add_one dbg savepath_before=$savepath" );
-          $app->log->debug( "Web::add_one dbg savepath_after="
+          $app->log->debug(   basename( __FILE__ ) . ":"
+                            . __LINE__
+                            . " dbg savepath_before=$savepath" );
+          $app->log->debug(   basename( __FILE__ ) . ":"
+                            . __LINE__
+                            . " dbg savepath_after="
                             . ( $munged_save_dbg || '(empty)' ) );
 
           if ( ref( $rename_dbg ) eq 'HASH' ) {
-            $app->log->debug( "Web::add_one dbg rename_intent="
+            $app->log->debug( basename( __FILE__ ) . ":"
+                      . __LINE__
+                      . " dbg rename_intent="
                       . ( $rename_dbg->{torrent_top_lvl} // '(undef)' ) . " -> "
                       . ( $rename_dbg->{drivespace_top_lvl} // '(undef)' ) );
           }
           else {
-            $app->log->debug( "Web::add_one dbg rename_intent=(none)" );
+            $app->log->debug(   basename( __FILE__ ) . ":"
+                              . __LINE__
+                              . " dbg rename_intent=(none)" );
           }
 
           if ( ref( $rename_dbg ) eq 'HASH' ) {
@@ -1198,7 +916,10 @@ sub app {
         }
 
         $app->log->debug(
-          "Web::add_one savepath_final=$savepath why=$why" . (
+                basename( __FILE__ ) . ":"
+              . __LINE__
+              . " savepath_final=$savepath why=$why"
+              . (
             ref( $pending_root_rename_data ) eq 'HASH'
             ? " rename_root $pending_root_rename_data->{torrent_top_lvl} ->
 $pending_root_rename_data->{drivespace_top_lvl}"
@@ -1227,9 +948,9 @@ $pending_root_rename_data->{drivespace_top_lvl}"
 
         _add_one_remove_hash( $c->app, $hash );
         my $st = _add_one_state( $c->app );
-        $app->log->debug(
-                       "[add_one] after remove ih=$hash idx=$st->{idx} queue_n="
-                           . scalar( @{$st->{queue} || []} ) );
+        $app->log->debug( __LINE__
+              . " [Web] [add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+              . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -1239,8 +960,8 @@ $pending_root_rename_data->{drivespace_top_lvl}"
       }
 
       my $body = $add->{body} // '';
-      $app->log->debug(
-"QBT add_one: ok=$add->{ok} code=$add->{code} body=$body savepath=$savepath"
+      $app->log->debug( __LINE__
+        . " Web add_one: ok=$add->{ok} code=$add->{code} body=$body savepath=$savepath"
       );
 
       if ( !$add->{ok} ) {
@@ -1256,9 +977,9 @@ $pending_root_rename_data->{drivespace_top_lvl}"
 
         _add_one_remove_hash( $c->app, $hash );
         my $st = _add_one_state( $c->app );
-        $app->log->debug(
-                       "[add_one] after remove ih=$hash idx=$st->{idx} queue_n="
-                           . scalar( @{$st->{queue} || []} ) );
+        $app->log->debug( __LINE__
+              . " [Web] [add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+              . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -1280,9 +1001,9 @@ $pending_root_rename_data->{drivespace_top_lvl}"
 
         _add_one_remove_hash( $c->app, $hash );
         my $st = _add_one_state( $c->app );
-        $app->log->debug(
-                       "[add_one] after remove ih=$hash idx=$st->{idx} queue_n="
-                           . scalar( @{$st->{queue} || []} ) );
+        $app->log->debug( __LINE__
+              . " [Web] [add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+              . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -1309,7 +1030,8 @@ $pending_root_rename_data->{drivespace_top_lvl}"
             . ( $rr->{drivespace_top_lvl} // '?' );
       }
 
-      $app->log->debug( "Web::add_one rename_intent=$rr_dbg" );
+      $app->log->debug(
+             basename( __FILE__ ) . ":" . __LINE__ . " rename_intent=$rr_dbg" );
 
       QBTL::Queue->enqueue_add_one(
                           $c->app, $hash,
@@ -1327,9 +1049,10 @@ $pending_root_rename_data->{drivespace_top_lvl}"
 
       _add_one_remove_hash( $c->app, $hash );
       my $st = _add_one_state( $c->app );
-      $app->log->debug(
-                       "[add_one] after remove ih=$hash idx=$st->{idx} queue_n="
-                           . scalar( @{$st->{queue} || []} ) );
+      $app->log->debug( basename( __FILE__ ) . ":"
+                 . __LINE__
+                 . " [add_one] after remove ih: $hash idx: $st->{idx} queue_n: "
+                 . scalar( @{$st->{queue} || []} ) );
       $c->app->defaults->{qbt_snap_ts} = 0;
 
       my $return_to = $c->param( 'return_to' ) // '';
@@ -1341,8 +1064,9 @@ $pending_root_rename_data->{drivespace_top_lvl}"
         $return_to = '/qbt/add_one';
       }
 
-      $app->log->debug(
-                     "1149 Web::add_one queued ih=$hash return_to=$return_to" );
+      $app->log->debug(   basename( __FILE__ ) . ":"
+                        . __LINE__
+                        . " add_one queued ih: $hash return_to: $return_to" );
       return $c->redirect_to( $return_to );
 
     } );
@@ -1583,15 +1307,336 @@ $pending_root_rename_data->{drivespace_top_lvl}"
 
   # ---------- Idle observer tick ----------
   my $tick_seconds = 5;
-  Mojo::IOLoop->recurring(
-    $tick_seconds => sub {
-      eval { QBTL::Queue->pump_tick( $app, opts => $opts ); 1 } or do {
-        my $err = "$@";
-        chomp $err;
-        $app->log->error( "[queue] pump_tick died: $err" );
-      };
-    } );
+  QBTL::Queue->start( $app, opts => $opts, tick_seconds => $tick_seconds );
+
   return $app;
 }
+
+# sub _add_one_current {
+#   my ( $app ) = @_;
+#   my $st      = _add_one_state( $app );
+#   my $q       = $st->{queue} || [];
+#   return undef unless @$q;
+#
+#   my $i = $st->{idx} || 0;
+#   $i         = 0 if $i < 0;
+#   $i         = 0 if $i > $#$q;
+#   $st->{idx} = $i;
+#
+#   return $q->[$i];
+# }
+
+# sub _add_one_meta_ref {
+#   my ( $app ) = @_;
+#   $app->defaults->{add_one_meta} ||= {};
+#   return $app->defaults->{add_one_meta};
+# }
+
+# sub _add_one_note_fail {
+#   my ( $app, $hash, $err, %extra ) = @_;
+#   return unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
+#
+#   my $m = _add_one_meta_ref( $app );
+#
+#   my $rec = ( $m->{$hash} ||= {hash => $hash, retries => 0, fails => 0} );
+#
+#   $rec->{fails}++;
+#   $rec->{failed_once} = 1 if $rec->{fails} >= 1;
+#   $rec->{last_error}  = $err // '';
+#   $rec->{ts_fail}     = time;
+#
+#   # optional breadcrumbs, no behavior
+#   for my $k ( keys %extra ) { $rec->{$k} = $extra{$k} }
+#
+#   return $rec;
+# }
+
+# sub _add_one_note_ok {
+#   my ( $app, $hash, %extra ) = @_;
+#   return unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
+#
+#   my $m = _add_one_meta_ref( $app );
+#
+#   my $rec = ( $m->{$hash} ||= {hash => $hash, retries => 0, fails => 0} );
+#   $rec->{ts_ok} = time;
+#
+#   for my $k ( keys %extra ) { $rec->{$k} = $extra{$k} }
+#
+#   return $rec;
+# }
+
+# sub _pending_ref {
+#   my ( $app ) = @_;
+#   $app->defaults->{pending} ||= {};
+#   return $app->defaults->{pending};    # { ih => { ... } }
+# }
+
+# sub _pending_enqueue_add_one {
+#   my ($app, $ih, %args) = @_;
+#   die "bad ih" unless defined($ih) && $ih =~ /^[0-9a-f]{40}$/;
+#
+#   # Optional:
+#   # $args{pending_root_rename_data} = { torrent_top_lvl => "...", drivespace_top_lvl => "..." }
+#
+#   my $pending_root_rename_data = $args{pending_root_rename_data};
+#
+#   my $need_root_rename =
+#       (   ref($pending_root_rename_data) eq 'HASH'
+#        && defined($pending_root_rename_data->{torrent_top_lvl})
+#        && length($pending_root_rename_data->{torrent_top_lvl})
+#        && defined($pending_root_rename_data->{drivespace_top_lvl})
+#        && length($pending_root_rename_data->{drivespace_top_lvl})
+#        && $pending_root_rename_data->{torrent_top_lvl} ne
+#        $pending_root_rename_data->{drivespace_top_lvl}) ? 1 : 0;
+#
+#   my $stage =
+#       $need_root_rename
+#       ? 'wait_visible_then_rename'
+#       : 'wait_visible_then_recheck';
+#
+#   _pending_upsert($app, $ih,
+#                   stage                    => $stage,
+#                   attempts                 => 0,
+#                   next_ts                  => time,     # eligible immediately
+#                   last_error               => '',
+#                   pending_root_rename_data =>
+#                   ($need_root_rename ? $pending_root_rename_data : undef),
+#                   savepath    => ($args{savepath}    // ''),
+#                   source_path => ($args{source_path} // ''),);
+#
+#   return;
+# }
+#
+# sub _pending_upsert {
+#   my ( $app, $ih, %patch ) = @_;
+#   die "bad ih" unless defined( $ih ) && $ih =~ /^[0-9a-f]{40}$/;
+#
+#   my $p = _pending_ref( $app );
+#   my $t = ( $p->{$ih} ||= {hash => $ih, ts_created => time} );
+#
+#   $t->{ts_updated} = time;
+#
+#   for my $k ( keys %patch ) {
+#     if ( defined $patch{$k} ) { $t->{$k} = $patch{$k}; }
+#     else                      { delete $t->{$k}; }  # optional: keep struct tidy
+#   }
+#
+#   return $t;
+# }
+#
+# sub _qbt_observer_tick {
+#   my ( $app, $opts ) = @_;
+#   $opts ||= {};
+#
+#   my $tasks = _tasks_ref( $app );
+#   $app->defaults->{observer_last_tick}  = time;
+#   $app->defaults->{observer_last_count} = scalar( keys %$tasks );
+#   return unless %$tasks;
+#
+#   $app->log->debug( "[observer] tick: tasks=" . scalar( keys %$tasks ) );
+#
+#   my $qbt;
+#   eval {
+#     $qbt = QBTL::QBT->new( $opts );
+#     1;
+#   } or do {
+#     my $err = "$@";
+#     chomp $err;
+#     for my $hash ( keys %$tasks ) {
+#       my $t = $tasks->{$hash};
+#       next unless ref( $t ) eq 'HASH';
+#       $t->{stage}  = 'fail';
+#       $t->{reason} = "observer: QBT init failed: $err";
+#       $t->{ts}     = time;
+#     }
+#     return;
+#   };
+#
+#   #   QBTL::Queue->pump_tick( $app, opts => $opts );
+#   for my $hash ( keys %$tasks ) {
+#     next unless $hash =~ /^[0-9a-f]{40}$/;
+#
+#     my $arr = eval { $qbt->api_torrents_info( hashes => $hash ) };
+#     if ( $@ ) {
+#       my $err = "$@";
+#       chomp $err;
+#       my $t = ( $tasks->{$hash} ||= {hash => $hash} );
+#       $t->{stage}  = 'fail';
+#       $t->{reason} = "observer: api_torrents_info failed: $err";
+#       $t->{ts}     = time;
+#       next;
+#     }
+#
+#     if ( !ref( $arr ) || ref( $arr ) ne 'ARRAY' || !@$arr ) {
+#       my $t = ( $tasks->{$hash} ||= {hash => $hash} );
+#       $t->{stage} = 'new';
+#       $t->{ts}    = time;
+#       next;
+#     }
+#
+#     my $t0       = $arr->[0];
+#     my $state    = ( ref( $t0 ) eq 'HASH' ) ? ( $t0->{state}    // '' ) : '';
+#     my $progress = ( ref( $t0 ) eq 'HASH' ) ? ( $t0->{progress} // -1 ) : -1;
+#
+#     my $t = ( $tasks->{$hash} ||= {hash => $hash} );
+#     $t->{last_state}    = $state;
+#     $t->{last_progress} = $progress;
+#     $t->{ts}            = time;
+#
+#     if ( $state =~ /^checking/i ) {
+#       $app->log->debug(
+#                       "[observer] hash=$hash state=$state progress=$progress" );
+#       $t->{stage} = 'rechecking';
+#       next;
+#     }
+#
+#     if ( defined $progress && $progress > 0 ) {
+#       $t->{stage} = 'ready';
+#       next;
+#     }
+#
+#     $t->{stage} = 'suspect_zero';
+#   }
+#
+#   return;
+# }
+#
+# sub _qbt_snapshot {
+#   my ( $app, $opts, $force ) = @_;
+#   $opts  ||= {};
+#   $force ||= 0;
+#
+#   my $ts = $app->defaults->{qbt_ts} || 0;
+#
+#   # choose your freshness window; 2s is plenty for UI clicks
+#   my $fresh_for = 2;
+#
+#   if ( !$force && $ts && ( time - $ts ) <= $fresh_for ) {
+#     return ( $app->defaults->{qbt_list} || [],
+#              $app->defaults->{qbt_by_ih} || {} );
+#   }
+#
+#   my $qbt  = QBTL::QBT->new( $opts );
+#   my $list = $qbt->api_torrents_info() || [];
+#
+#   my %by;
+#   for my $t ( @$list ) {
+#     next if ref( $t ) ne 'HASH';
+#     my $h = $t->{hash} // '';
+#     next unless $h =~ /^[0-9a-fA-F]{40}$/;
+#     $by{lc( $h )} = $t;
+#   }
+#
+#   $app->defaults->{qbt_list}  = $list;
+#   $app->defaults->{qbt_by_ih} = \%by;
+#   $app->defaults->{qbt_ts}    = time;
+#
+#   return ( $list, \%by );
+# }
+#
+# sub _shuffle_in_place {
+#   my ( $a ) = @_;
+#   return $a unless ref( $a ) eq 'ARRAY';
+#   for ( my $i = @$a - 1 ; $i > 0 ; $i-- ) {
+#     my $j = int( rand( $i + 1 ) );
+#     next if $i == $j;
+#     @$a[ $i, $j ] = @$a[ $j, $i ];
+#   }
+#   return $a;
+# }
+
+# sub _qbt_snapshot_refresh {
+#   my ( $app, $qbt ) = @_;
+#   my $snap = _qbt_snapshot( $app );
+#   my $by   = $qbt->api_torrents_infohash();
+#   $by            = {} if ref( $by ) ne 'HASH';
+#   $snap->{by_ih} = $by;
+#   $snap->{ts}    = time;
+#   return $by;
+# }
+#
+# sub _qbt_snapshot_put_one {
+#   my ( $app, $hash, $t ) = @_;
+#   return unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
+#   return unless ref( $t ) eq 'HASH';
+#   my $snap = _qbt_snapshot( $app );
+#   $snap->{by_ih}{$hash} = $t;
+#   $snap->{ts} = time;
+#   return;
+# }
+#
+# sub _task_counts {
+#   my ( $app ) = @_;
+#   my $tasks = _tasks_ref( $app );
+#
+#   my %counts;
+#   for my $hash ( keys %$tasks ) {
+#     my $t = $tasks->{$hash};
+#     next unless ref( $t ) eq 'HASH';
+#     my $stage = $t->{stage} || 'unknown';
+#     $counts{$stage}++;
+#   }
+#
+#   my $total = scalar( keys %$tasks );
+#   return ( $total, \%counts );
+# }
+#
+# sub _task_fail_items {
+#   my ( $app, $limit ) = @_;
+#   $limit ||= 200;
+#
+#   my $tasks = _tasks_ref( $app );
+#   my @fails;
+#
+#   for my $hash ( keys %$tasks ) {
+#     my $t = $tasks->{$hash};
+#     next unless ref( $t ) eq 'HASH';
+#     next unless ( $t->{stage} || '' ) eq 'fail';
+#     push @fails, $t;
+#   }
+#
+#   @fails = sort { ( $b->{ts} || 0 ) <=> ( $a->{ts} || 0 ) } @fails;
+#
+#   @fails = @fails[ 0 .. ( $limit - 1 ) ] if @fails > $limit;
+#   return \@fails;
+# }
+#
+# sub _tasks_ref {
+#   my ( $app ) = @_;
+#   $app->defaults->{tasks} ||= {};
+#   return $app->defaults->{tasks};
+# }
+#
+# sub _task_upsert {
+#   my ( $app, $hash, %patch ) = @_;
+#   $hash = lc( $hash // '' );
+#
+#   $app->defaults->{tasks} ||= {};
+#   my $t =
+#       ( $app->defaults->{tasks}{$hash} ||=
+#         {hash => $hash, ts_created => time} );
+#
+#   $t->{ts_updated} = time;
+#   @$t{keys %patch} = values %patch;
+#
+#   return $t;
+# }
+
+# ---------- Idle observer tick ----------
+
+#   my $tick_seconds = 5;
+#
+#   #   QBTL::Queue->start( $app, opts => $opts, tick_seconds => $tick_seconds );
+#
+#   Mojo::IOLoop->recurring(
+#     $tick_seconds => sub {
+#       eval { QBTL::Queue->pump_tick( $app, opts => $opts ); 1 } or do {
+#         my $err = "$@";
+#         chomp $err;
+#         $app->log->error( __LINE__ . " [Web] pump_tick died: $err" );
+#       };
+#     } );
+#   return $app;
+#}
 
 1;
