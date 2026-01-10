@@ -1,6 +1,7 @@
 package QBTL::Queue;
 
 use common::sense;
+use Cwd qw( abs_path );
 use Mojo::IOLoop;
 
 use QBTL::QBT;
@@ -27,9 +28,6 @@ my %REQUEUE_POLICY = (
 # Public API
 # ------------------------------
 
-use File::Basename qw( dirname );
-use Cwd            qw( abs_path );
-
 sub start {
   my ( $class, $app, %args ) = @_;
   my $opts         = $args{opts}         || {};
@@ -39,7 +37,7 @@ sub start {
   return if $$idref;
   $app->log->debug(   basename( __FILE__ ) . ":"
                     . __LINE__
-                    . " start called tick_seconds=$tick_seconds" );
+                    . " start called tick_seconds: $tick_seconds" );
   my $id = Mojo::IOLoop->recurring(
     $tick_seconds => sub {
       eval { $class->pump_tick( $app, opts => $opts ); 1 } or do {
@@ -51,7 +49,8 @@ sub start {
     } );
 
   $$idref = $id;
-  $app->log->debug( " [queue] start: tick id=$id" );
+  $app->log->debug(
+               basename( __FILE__ ) . ":" . __LINE__ . " start: tick id: $id" );
   return $id;
 }
 
@@ -61,7 +60,8 @@ sub stop {
   return unless $$idref;
 
   Mojo::IOLoop->remove( $$idref );
-  $app->log->debug( " [queue] stop: tick id=$$idref" );
+  $app->log->debug(
+            basename( __FILE__ ) . ":" . __LINE__ . " stop: tick id: $$idref" );
   $$idref = undef;
   return 1;
 }
@@ -127,7 +127,7 @@ sub _jobs_summary {
   }
 
   # optional ZEN: include only if non-zero
-  push @parts, "ZEN=$n{ZEN}" if $n{ZEN};
+  push @parts, "ZEN: $n{ZEN}" if $n{ZEN};
 
   return join( " ", @parts );
 }
@@ -138,8 +138,9 @@ sub _jobs_summary {
 sub enqueue_add_one {
   my ( $class, $app, $ih, %args ) = @_;
   die "bad ih" unless defined( $ih ) && $ih =~ /^[0-9a-f]{40}$/;
-  $app->log->debug(
-    basename( __FILE__ ) . ":" . __LINE__ . " Entered enqueue_add_one ih=$ih" );
+  $app->log->debug(   basename( __FILE__ ) . ":"
+                    . __LINE__
+                    . " Entered enqueue_add_one ih: $ih" );
   my $jobs = _jobs_ref( $app );
   my $now  = time;
 
@@ -247,108 +248,89 @@ sub _renamed_root_ref {
 # ------------------------------
 # Tick runner
 # ------------------------------
-
 sub pump_tick {
   my ( $class, $app, %args ) = @_;
+  state $n = 0;
+  $n++;
 
-  state $inflight = 0;
-  if ( $inflight ) {
-    $app->log->debug(
-       basename( __FILE__ ) . ":" . __LINE__ . " pump_tick : skip (inflight)" );
-    return;
-  }
-  $inflight = 1;
-
-  my $ok  = eval { _pump_tick_impl( $class, $app, %args ); 1 };
-  my $err = $@;
-  $inflight = 0;
-
-  if ( !$ok ) {
-    chomp $err;
-    $app->log->error(
-            basename( __FILE__ ) . ":" . __LINE__ . " pump_tick died : $err " );
-  }
-
-  return;
-}
-
-sub _pump_tick_impl {
-  my ( $class, $app, %args ) = @_;
   my $opts = $args{opts} || {};
   my $jobs = _jobs_ref( $app );
 
   my $sum = _jobs_summary( $jobs );
   $app->log->debug(
-                 basename( __FILE__ ) . ":" . __LINE__ . " pump_tick : $sum " );
+           basename( __FILE__ ) . ":" . __LINE__ . " [queue] pump_tick: $sum" );
   return unless %$jobs;
 
   my $qbt;
   my $qbt_ok = eval { $qbt = QBTL::QBT->new(); 1 };
-  if ( !$qbt_ok ) {
-    my $err = "$@ ";
+  unless ( $qbt_ok ) {
+    my $err = "$@";
     chomp $err;
-    $app->log->error(
-           basename( __FILE__ ) . ":" . __LINE__ . " QBT init failed : $err " );
+    $app->log->error( "[queue] QBT init failed: $err" );
     return;
   }
 
   my $now        = time;
   my $tick_cache = {};     # per invocation cache
+
+  # ---- qBt prefs snapshot (once per tick) ----
+  # Only used for symlink bridge + needs_user re-init gating.
+  my $temp_enabled = undef;    # 1|0|undef
+  my $prefs_ok     = eval {
+    my $prefs = $qbt->api_app_preferences();    # HASH
+    if ( ref( $prefs ) eq 'HASH' && exists $prefs->{temp_path_enabled} ) {
+      $temp_enabled = $prefs->{temp_path_enabled} ? 1 : 0;
+    }
+    1;
+  };
+  if ( !$prefs_ok ) {
+    my $e = "$@";
+    chomp $e;
+    $app->log->error(
+         basename( __FILE__ ) . ":" . __LINE__ . " prefs snapshot failed: $e" );
+    $temp_enabled = undef;
+  }
+
+  $tick_cache->{prefs} ||= {};
+  $tick_cache->{prefs}{temp_path_enabled} = $temp_enabled;
+  $app->log->debug(  basename( __FILE__ ) . ":"
+                   . __LINE__
+                   . " temp_path_enabled: "
+                   . ( defined( $temp_enabled ) ? $temp_enabled : '(undef)' ) );
+
   for my $ih ( sort keys %$jobs ) {
     my $job = $jobs->{$ih};
-
-    #     $app->log->debug(   basename( __FILE__ ) . ":"
-    #                       . __LINE__
-    #                       . "  job_scan ih = $ih ref = "
-    #                       . ( ref( $job ) || 'SCALAR' ) );
     next if ref( $job ) ne 'HASH';
 
-REINIT: {
-      last REINIT unless ( $job->{status} // '' ) eq 'needs_user';
-
-      $app->log->debug(   basename( __FILE__ ) . ":"
-                        . __LINE__ . " "
-                        . ( $job->{status} // '(undef)' ), );
-
+    # -------- needs_user re-init gating (ONLY) --------
+    if ( ( $job->{status} // '' ) eq 'needs_user' ) {
       my $reason = $job->{needs_user_reason} // $job->{interactive_reason}
           // '';
 
-      $app->log->debug(   basename( __FILE__ ) . ":"
-                        . __LINE__
-                        . " reason="
-                        . ( length( $reason ) ? $reason : '(none)' ) );
+      if ( $reason eq 'renamed_root_class' ) {
+        my $enabled = $tick_cache->{prefs}{temp_path_enabled};    # 1|0|undef
 
-      last REINIT unless $reason eq 'renamed_root_class';
-      my $enabled = _qbt_temp_path_enabled_cached( $qbt, $tick_cache );
+        # only re-init when temp path is definitively OFF
+        if ( defined( $enabled ) && !$enabled ) {
+          $job->{status}          = 'queued';
+          $job->{stage}           = 'queued';
+          $job->{step_idx}        = 0;
+          $job->{steps}           = _build_steps_add_one( $job );
+          $job->{next_ts}         = $now + 0.5;
+          $job->{ts_updated}      = $now;
+          $job->{terminal_logged} = 0;
 
-      $app->log->debug(   basename( __FILE__ ) . ":"
-                        . __LINE__
-                        . "  maybe_reinit_needs_user ih: "
-                        . ( $job->{ih} // '' )
-                        . " temp_path_enabled: "
-                        . ( defined( $enabled ) ? $enabled : '(undef)' ) );
+          delete $job->{recheck_requested_ts};
+          delete $job->{recheck_last_check0};
+          delete $job->{stability_probe_inserted};
 
-      last REINIT if !defined( $enabled ) || $enabled;
-
-      # re-init
-      $job->{status}          = 'queued';
-      $job->{stage}           = 'queued';
-      $job->{step_idx}        = 0;
-      $job->{steps}           = _build_steps_add_one( $job );
-      $job->{next_ts}         = $now + 0.5;
-      $job->{ts_updated}      = $now;
-      $job->{terminal_logged} = 0;
-
-      delete $job->{recheck_requested_ts};
-      delete $job->{recheck_last_check0};
-      delete $job->{stability_probe_inserted};
-
-      $app->log->debug(   basename( __FILE__ ) . ":"
-                        . __LINE__
-                        . "  reinit needs_user ih: "
-                        . ( $job->{ih} // '' )
-                        . " reason = $reason ( temp_path_enabled: 0 ) " );
+          $app->log->debug(
+"[queue] reinit needs_user ih=$ih reason=$reason (temp_path_enabled=0)"
+          );
+        }
+      }
     }
+
     my $status   = $job->{status}   // '';
     my $stage    = $job->{stage}    // '';
     my $step_idx = $job->{step_idx} // 0;
@@ -361,26 +343,25 @@ REINIT: {
       $job->{terminal_logged} = 1;
 
       $app->log->debug(
-         sprintf(
-           "Q->[JOB] ih: %s status: %s stage: %s step_idx: %s %s ( terminal ) ",
-           $ih, $status, $stage, $step_idx ) );
+            sprintf(
+                     "Q->[JOB] ih=%s status=%s stage=%s step_idx=%s (terminal)",
+                     $ih, $status, $stage, $step_idx ) );
       next;
     }
 
-    # non-terminal jobs: next_ts defaults to " now " if missing/garbage
+    # non-terminal jobs: next_ts defaults to now if missing/garbage
     my $next_ts = $job->{next_ts};
-    $next_ts = $now if !defined( $next_ts ) || $next_ts !~ /^\d+$/;
+    $next_ts = $now if !defined( $next_ts ) || $next_ts !~ /^\d+$/;    # FIXED
 
     my $wait = $next_ts - $now;
 
     $app->log->debug(
-            basename( __FILE__ ) . ":"
-          . __LINE__
-          . sprintf(
-" Q->[JOB]  ih: %s status: %s stage: %s step_idx: %s next: %s now: %s wait: %+ ds ",
-        short_ih( $ih ), $status,                $stage,
-        $step_idx,       epoch2time( $next_ts ), epoch2time( $now ),
-        $wait ) );
+      sprintf(
+"Q->[JOB] ih=%s status=%s stage=%s step_idx=%s next=%s now=%s wait=%+ds",
+        $ih, $status, $stage, $step_idx,
+        epoch2time( $next_ts ),
+        epoch2time( $now ), $wait ) );
+
     next if $next_ts > $now;
 
     my $steps = $job->{steps};
@@ -400,27 +381,17 @@ REINIT: {
       $remain = 0 if $remain < 0;
 
       my $ops = join(
-        ", ",
-        map {
-          ( ref( $_ ) eq 'HASH' )
-              ? (
-            $_->{op} // "
-    ? " )
-              : "
-          ? "
-        } @$steps[ $step_idx .. $#$steps ] );
+                     ", ",
+                     map { ( ref( $_ ) eq 'HASH' ) ? ( $_->{op} // "?" ) : "?" }
+                          @$steps[ $step_idx .. $#$steps ] );
 
-      $app->log->debug(   basename( __FILE__ ) . ":"
-                        . __LINE__
-                        . " Q->[PLAN] ih: "
-                        . short_ih( $ih )
-                        . " steps_remaining: $remain ops: [$ops] " );
+      $app->log->debug( "Q->[PLAN] ih=$ih steps_remaining=$remain ops=[$ops]" );
     }
 
     my $step = $steps->[$step_idx];
     if ( ref( $step ) ne 'HASH' ) {
       _job_mark_failed( $app, $job, $now,
-                        " bad step at idx: $step_idx ( not a HASH ) " );
+                        "bad step at idx=$step_idx (not a HASH)" );
       next;
     }
 
@@ -432,10 +403,8 @@ REINIT: {
     my ( $result, $why, $hint ) =
         _run_step( $app, $qbt, $job, $step, $tick_cache );
 
-    $app->log->debug(   basename( __FILE__ ) . ":"
-                      . __LINE__
-                      . "  step ih: $ih op: $op result: $result why: "
-                      . ( $why // '' ) );
+    $app->log->debug(
+            "[queue] step ih=$ih op=$op result=$result why=" . ( $why // '' ) );
 
     if ( $result eq 'advance' ) {
       _job_advance_step( $job, $now );
@@ -445,8 +414,6 @@ REINIT: {
     if ( $result eq 'retry' ) {
       my $rr = _job_retry_step( $app, $job, $step, $now, $why );
 
-      # If the retry handler decided this job now " needs_user ",
-      # remove torrent from qBt (keep data) right now.
       if ( defined( $rr ) && $rr eq 'needs_user' ) {
         _qbt_remove_torrent( $app, $qbt, $ih, delete_files => 0 );
         next;
@@ -457,26 +424,19 @@ REINIT: {
 
     if ( $result eq 'interactive' ) {
       _qbt_remove_torrent( $app, $qbt, $ih, delete_files => 0 );    # keep data
-
       my $reason = $why  || 'unknown';
       my $detail = $hint || '';
-
       _job_mark_needs_user( $app, $job, $now, $reason, $why, $detail );
       next;
     }
 
     if ( $result eq 'renamed_root' ) {
-
-      # Otherwise: embrace failure → quarantine bucket
       _qbt_remove_torrent( $app, $qbt, $ih, delete_files => 0 );    # keep data
       _job_mark_renamed_root( $app, $job, $now, $why, $hint );
       next;
     }
 
-#######################################
-    # this is the edge-case catcher.
-#######################################
-
+    # edge-case catcher
     my $is_rename_symlink_class =
         ( ref( $job->{rename} ) eq 'HASH' ) || ( $job->{symlink_used} );
     if ( $is_rename_symlink_class ) {
@@ -485,18 +445,15 @@ REINIT: {
                               $job,
                               $now,
                               'unexpected_result',
-                              ( $why || " failed( result: $result ) " ),
-                              " op = "
+                              ( $why || "failed (result=$result)" ),
+                              "op="
                                   . ( $job->{stage} // '' )
-                                  . " step_idx = "
+                                  . " step_idx="
                                   . ( $job->{step_idx} // 0 ) );
       next;
     }
 
-    _job_mark_failed(
-      $app, $job, $now, $why
-          || " failed( result: $result )
-          " );
+    _job_mark_failed( $app, $job, $now, $why || "failed (result=$result)" );
   }
 
   return;
@@ -505,18 +462,6 @@ REINIT: {
 # ------------------------------
 # Job state helpers
 # ------------------------------
-#
-# sub _job_clear_seen_reason {
-#   my ( $job, $reason, $now ) = @_;
-#   return unless ref( $job ) eq 'HASH' && length( $reason // '' );
-#
-#   # Keep history if you want it:
-#   $job->{needs_user_resolved} ||= {};
-#   $job->{needs_user_resolved}{$reason} = $now if defined $now;
-#
-#   delete $job->{needs_user_seen}{$reason}
-#       if ref( $job->{needs_user_seen} ) eq 'HASH';
-# }
 
 sub _job_mark_done {
   my ( $app, $job, $now ) = @_;
@@ -600,11 +545,9 @@ sub _job_mark_needs_user {
                stage    => ( $job->{stage}    // '' ),
                step_idx => ( $job->{step_idx} // 0 ),};
 
-  $app->log->debug(
-          basename( __FILE__ ) . ":"
-        . __LINE__
-        . "  needs_user ih = $ih reason = $reason stage =
-          $g->{$ih}{stage} why = $why "
+  $app->log->debug( basename( __FILE__ ) . ":"
+     . __LINE__
+     . "  needs_user ih: $ih reason: $reason stage: $g->{$ih}{stage} why: $why "
   );
 
   return 1;
@@ -640,11 +583,9 @@ sub _job_mark_needs_triage {
                stage    => ( $job->{stage}    // '' ),
                step_idx => ( $job->{step_idx} // 0 ),};
 
-  $app->log->error(
-          ":"
-        . __LINE__
-        . "  needs_triage ih = $ih reason = $reason stage =
-          $t->{$ih}{stage} why = $why "
+  $app->log->error( ":"
+    . __LINE__
+    . "  needs_triage ih: $ih reason: $reason stage: $t->{$ih}{stage} why: $why "
   );
 
   return 1;
@@ -671,11 +612,9 @@ sub _job_mark_renamed_root {
                stage    => ( $job->{stage}    // '' ),
                step_idx => ( $job->{step_idx} // 0 ),};
 
-  $app->log->debug(
-          basename( __FILE__ ) . ":"
-        . __LINE__
-        . "  renamed_root ih = $ih reason =
-          $r->{$ih}{reason} " );
+  $app->log->debug(   basename( __FILE__ ) . ":"
+                    . __LINE__
+                    . "  renamed_root ih: $ih reason: $r->{$ih}{reason} " );
   return 1;
 }
 
@@ -810,7 +749,7 @@ sub _job_retry_step {
     $job->{next_ts} = $ts if $ts > $now;
     $app->log->debug(   basename( __FILE__ ) . ":"
                       . __LINE__
-                      . "  probe_checking sleep_until = "
+                      . "  probe_checking sleep_until: "
                       . epoch2time( $job->{next_ts} ) );
     return 1;
   }
@@ -840,7 +779,7 @@ sub _job_retry_step {
           : '';
     }
     _job_mark_needs_user( $app, $job, $now,
-                          ( $why || " blocked after retries( op = $op ) " ),
+                          ( $why || " blocked after retries( op: $op ) " ),
                           $hint, " No reason provided " );
     return 'needs_user';
   }
@@ -848,12 +787,12 @@ sub _job_retry_step {
   my $delay = $arr->[ $step->{tries} - 1 ];
   $job->{next_ts} = $now + $delay;
 
-  $app->log->debug( basename( __FILE__ ) . ":"
-                  . __LINE__
-                  . "  retry ih: "
-                  . ( $job->{ih} // '' )
-                  . " op = $op tries = $step->{tries} next_in: ${delay} s why: "
-                  . ( $why // '' ) );
+  $app->log->debug(   basename( __FILE__ ) . ":"
+                    . __LINE__
+                    . "  retry ih: "
+                    . ( $job->{ih} // '' )
+                    . " op: $op tries: $step->{tries} next_in: ${delay} s why: "
+                    . ( $why // '' ) );
 
   return 1;
 }
@@ -922,6 +861,9 @@ sub _qbt_torrents_info_one_cached {
   $tick_cache ||= {};
   $tick_cache->{torrents_info_one} ||= {};
 
+  # capture last qBt API error for callers (e.g. wait_visible)
+  delete $tick_cache->{qbt_last_err};
+
   return $tick_cache->{torrents_info_one}{$ih}
       if exists $tick_cache->{torrents_info_one}{$ih};
 
@@ -929,6 +871,11 @@ sub _qbt_torrents_info_one_cached {
 
   # Preferred: a single-torrent endpoint if your QBT wrapper has it.
   $t = eval { $qbt->api_torrents_info_one( $ih ) };
+  if ( $@ ) {
+    my $e = "$@";
+    chomp $e;
+    $tick_cache->{qbt_last_err} = "api_torrents_info_one died: $e";
+  }
   if ( ref( $t ) eq 'HASH' ) {
     $tick_cache->{torrents_info_one}{$ih} = $t;
     return $t;
@@ -936,6 +883,21 @@ sub _qbt_torrents_info_one_cached {
 
   # Fallback: list endpoint + grep (common in wrappers)
   my $arr = eval { $qbt->api_torrents_info() };
+  if ( $@ ) {
+    my $e = "$@";
+    chomp $e;
+    $tick_cache->{qbt_last_err} ||= "api_torrents_info died: $e";
+  }
+
+  # If your wrapper returns {ok=>0,...} on failure, surface that as an error.
+  if ( ref( $arr ) eq 'HASH' && exists $arr->{ok} && !$arr->{ok} ) {
+    my $code = $arr->{code} // 0;
+    my $body = $arr->{body} // '';
+    $tick_cache->{qbt_last_err} ||=
+        "api_torrents_info not ok: http: $code body: [$body]";
+    $tick_cache->{torrents_info_one}{$ih} = undef;
+    return undef;
+  }
   if ( ref( $arr ) eq 'ARRAY' ) {
     for my $x ( @$arr ) {
       next unless ref( $x ) eq 'HASH';
@@ -960,15 +922,14 @@ sub _qbt_remove_torrent {
     chomp $e;
     $app->log->debug(   basename( __FILE__ ) . ":"
                       . __LINE__
-                      . " qbt delete threw ih=$ih err=$e" );
+                      . " qbt delete threw ih: $ih err=$e" );
     return ( 0, $e );
   }
 
   if ( ref( $res ) eq 'HASH' && $res->{ok} ) {
-    $app->log->debug(   ":"
-                      . basename( __FILE__ ) . ":"
+    $app->log->debug(   basename( __FILE__ ) . ":"
                       . __LINE__
-                      . "  qbt delete ok ih=$ih delete_files=$delete_files" );
+                      . "  qbt delete ok ih: $ih delete_files: $delete_files" );
     return ( 1, 'ok' );
   }
 
@@ -977,8 +938,8 @@ sub _qbt_remove_torrent {
   $app->log->debug(   ":"
                     . basename( __FILE__ ) . ":"
                     . __LINE__
-                    . "  qbt delete not ok ih=$ih http=$code body=[$body]" );
-  return ( 0, "http=$code body=[$body]" );
+                    . "  qbt delete not ok ih: $ih http: $code body: [$body]" );
+  return ( 0, "http: $code body: [$body]" );
 }
 
 sub _qbt_prefs_cached {
@@ -989,26 +950,6 @@ sub _qbt_prefs_cached {
   my $p = eval { $qbt->api_qbt_preferences() };
   $tick_cache->{app_prefs} = ( ref( $p ) eq 'HASH' ) ? $p : undef;
   return $tick_cache->{app_prefs};
-}
-
-sub _qbt_temp_path_enabled_cached {
-  my ( $qbt, $tick_cache ) = @_;
-  $tick_cache ||= {};
-  $tick_cache->{prefs} ||= {};
-
-  return $tick_cache->{prefs}{temp_path_enabled}
-      if exists $tick_cache->{prefs}{temp_path_enabled};
-
-  # wrapper should implement this; see note below
-  my $prefs = eval { $qbt->api_qbt_preferences() };
-
-  my $enabled = undef;
-  if ( ref( $prefs ) eq 'HASH' && exists $prefs->{temp_path_enabled} ) {
-    $enabled = $prefs->{temp_path_enabled} ? 1 : 0;
-  }
-
-  $tick_cache->{prefs}{temp_path_enabled} = $enabled;    # can be undef
-  return $enabled;
 }
 
 # ------------------------------
@@ -1041,7 +982,7 @@ sub _run_step {
 /^(checking|checkingDL|checkingResumeData|queuedForChecking|queuedForCheck|allocating)/i
         )
     {
-      return ( 'advance', "confirm_checking: now checking (state=$state)" );
+      return ( 'advance', "confirm_checking: now checking (state: $state)" );
     }
 
     # SUCCESS SIGNAL #2: last_check moved
@@ -1067,7 +1008,7 @@ sub _run_step {
 
     return (
              'retry',
-             "confirm_checking: not reflected yet (state=$state"
+             "confirm_checking: not reflected yet (state: $state"
                  . " last_check="
                  . ( defined( $last_check ) ? $last_check : '(undef)' )
                  . " progress="
@@ -1106,10 +1047,10 @@ sub _run_step {
 
     my $state = $t0->{state} // '';
     return ( 'retry',
-             "confirm_not_checking: unexpectedly checking (state=$state)" )
+             "confirm_not_checking: unexpectedly checking (state: $state)" )
         if $state =~ /checking/i;
 
-    return ( 'advance', "confirm_not_checking: not checking (state=$state)" );
+    return ( 'advance', "confirm_not_checking: not checking (state: $state)" );
   }
 
   if ( $op eq 'delete_torrent' ) {
@@ -1128,7 +1069,7 @@ sub _run_step {
     my $code = ( ref( $res ) eq 'HASH' ) ? ( $res->{code} // 0 )  : 0;
     my $body = ( ref( $res ) eq 'HASH' ) ? ( $res->{body} // '' ) : '';
 
-    return ( 'retry', "delete_torrent: failed http=$code body=[$body]" );
+    return ( 'retry', "delete_torrent: failed http: $code body: [$body]" );
   }
 
   if ( $op eq 'interactive' ) {
@@ -1149,10 +1090,10 @@ sub _run_step {
 
     # expected: it is NOT checking anymore
     if ( $state =~ /checking/i ) {
-      return ( 'retry', "probe_checking: still checking (state=$state)" );
+      return ( 'retry', "probe_checking: still checking (state: $state)" );
     }
 
-    return ( 'advance', "probe_checking: died as expected (state=$state)" );
+    return ( 'advance', "probe_checking: died as expected (state: $state)" );
   }
 
   if ( $op eq 'recheck' ) {
@@ -1165,9 +1106,9 @@ sub _run_step {
 
     $app->log->debug(   basename( __FILE__ ) . ":"
                       . __LINE__
-                      . " $op ih=$ih state="
+                      . " $op ih: $ih state: "
                       . ( $t0->{state} // '' )
-                      . " save_path="
+                      . " save_path: "
                       . ( $t0->{save_path} // '' )
                       . " download_path="
                       . ( $t0->{download_path} // '' ) );
@@ -1241,7 +1182,7 @@ sub _run_step {
     if ( ref( $r ) ne 'HASH' || !$r->{ok} ) {
       my $code = ( ref( $r ) eq 'HASH' ) ? ( $r->{code} // 0 )  : 0;
       my $body = ( ref( $r ) eq 'HASH' ) ? ( $r->{body} // '' ) : '';
-      return ( 'retry', "recheck: recheck not ok: http=$code body=[$body]" );
+      return ( 'retry', "recheck: recheck not ok: http: $code body: [$body]" );
     }
 
     $job->{recheck_requested_ts} = time;
@@ -1252,9 +1193,9 @@ sub _run_step {
     if ( ref( $t1 ) eq 'HASH' ) {
       $app->log->debug(   basename( __FILE__ ) . ":"
                         . __LINE__
-                        . " post-recheck ih=$ih state="
+                        . " post-recheck ih: $ih state: "
                         . ( $t1->{state} // '' )
-                        . " save_path="
+                        . " save_path: "
                         . ( $t1->{save_path} // '' )
                         . " download_path="
                         . ( $t1->{download_path} // '' ) );
@@ -1311,14 +1252,24 @@ sub _run_step {
     }
 
     return ( 'retry',
-             "rename_root: renameFolder not ok: http=$code body=[$body]" );
+             "rename_root: renameFolder not ok: http: $code body: [$body]" );
   }
 
   if ( $op eq 'wait_visible' ) {
     my $t = _qbt_torrents_info_one_cached( $qbt, $tick_cache, $ih );
+
     if ( ref( $t ) eq 'HASH' && ( $t->{hash} // '' ) =~ /^[0-9a-f]{40}$/ ) {
       return ( 'advance', $op . ': now visible' );
     }
+
+    if (    exists $tick_cache->{qbt_last_err}
+         && defined $tick_cache->{qbt_last_err}
+         && length $tick_cache->{qbt_last_err} )
+    {
+      return ( 'retry',
+               $op . ': qbt api error: ' . $tick_cache->{qbt_last_err} );
+    }
+
     return ( 'retry', $op . ': not visible yet' );
   }
 
@@ -1338,7 +1289,7 @@ sub _run_step {
 # /^(checking|checkingResumeData|queuedForChecking|queuedForCheck|allocating)/i
 #         )
 #     {
-#       return ( 'advance', "probe: still checking (state=$state)" );
+#       return ( 'advance', "probe: still checking (state: $state)" );
 #     }
 #
 # # Some builds flip states fast; last_check advancing is also a good survival signal
@@ -1405,4 +1356,266 @@ sub _run_step {
 #   my $p = _qbt_prefs_cached( $qbt, $tick_cache );
 #   return 0 unless ref( $p ) eq 'HASH';
 #   return $p->{temp_path_enabled} ? 1 : 0;
+# }
+
+#
+# sub _job_clear_seen_reason {
+#   my ( $job, $reason, $now ) = @_;
+#   return unless ref( $job ) eq 'HASH' && length( $reason // '' );
+#
+#   # Keep history if you want it:
+#   $job->{needs_user_resolved} ||= {};
+#   $job->{needs_user_resolved}{$reason} = $now if defined $now;
+#
+#   delete $job->{needs_user_seen}{$reason}
+#       if ref( $job->{needs_user_seen} ) eq 'HASH';
+# }
+
+# sub pump_tick {
+#   my ( $class, $app, %args ) = @_;
+#
+#   state $inflight = 0;
+#   if ( $inflight ) {
+#     $app->log->debug(
+#         basename( __FILE__ ) . ":" . __LINE__ . " pump_tick: skip (inflight)" );
+#     return;
+#   }
+#   $inflight = 1;
+#
+#   my $ok  = eval { _pump_tick_impl( $class, $app, %args ); 1 };
+#   my $err = $@;
+#   $inflight = 0;
+#
+#   unless ( $ok ) {
+#     chomp $err;
+#     $app->log->error(
+#              basename( __FILE__ ) . ":" . __LINE__ . " pump_tick died: $err " );
+#   }
+#
+#   return;
+# }
+#
+# sub _pump_tick_impl {
+#   my ( $class, $app, %args ) = @_;
+#   my $opts = $args{opts} || {};
+#   my $jobs = _jobs_ref( $app );
+#
+#   my $sum = _jobs_summary( $jobs );
+#   $app->log->debug(
+#                   basename( __FILE__ ) . ":" . __LINE__ . " pump_tick: $sum " );
+#   return unless %$jobs;
+#
+#   my $qbt;
+#   my $qbt_ok = eval { $qbt = QBTL::QBT->new(); 1 };
+#   unless ( $qbt_ok ) {
+#     my $err = "$@ ";
+#     chomp $err;
+#     $app->log->error(
+#             basename( __FILE__ ) . ":" . __LINE__ . " QBT init failed: $err " );
+#     return;
+#   }
+#
+#   my $now        = time;
+#   my $tick_cache = {};     # per invocation cache
+#   for my $ih ( sort keys %$jobs ) {
+#     my $job = $jobs->{$ih};
+#     next if ref( $job ) ne 'HASH';
+#
+# REINIT: {
+#       last REINIT unless ( $job->{status} // '' ) eq 'needs_user';
+#       my $reason = $job->{needs_user_reason} // $job->{interactive_reason}
+#           // '';
+#       last REINIT unless $reason eq 'renamed_root_class';
+#       my $enabled = _qbt_temp_path_enabled_cached( $qbt, $tick_cache );
+#       $app->log->debug(   basename( __FILE__ ) . ":"
+#                         . __LINE__
+#                         . "  maybe_reinit_needs_user ih: "
+#                         . ( $job->{ih} // '' )
+#                         . " temp_path_enabled: "
+#                         . ( defined( $enabled ) ? $enabled : '(undef)' ) );
+#       last REINIT if !defined( $enabled ) || $enabled;
+#
+#       # re-init
+#       $job->{status}          = 'queued';
+#       $job->{stage}           = 'queued';
+#       $job->{step_idx}        = 0;
+#       $job->{steps}           = _build_steps_add_one( $job );
+#       $job->{next_ts}         = $now + 0.5;
+#       $job->{ts_updated}      = $now;
+#       $job->{terminal_logged} = 0;
+#
+#       delete $job->{recheck_requested_ts};
+#       delete $job->{recheck_last_check0};
+#       delete $job->{stability_probe_inserted};
+#     }
+#     my $status   = $job->{status}   // '';
+#     my $stage    = $job->{stage}    // '';
+#     my $step_idx = $job->{step_idx} // 0;
+#
+#     my $is_terminal = ( $status =~ /^(done|failed|needs_user|needs_triage)$/ );
+#     if ( $is_terminal ) {
+#       delete $job->{next_ts};
+#
+#       next if $job->{terminal_logged};
+#       $job->{terminal_logged} = 1;
+#
+#       $app->log->debug(
+#          sprintf(
+#            "Q->[JOB] ih: %s status: %s stage: %s step_idx: %s %s ( terminal ) ",
+#            $ih, $status, $stage, $step_idx ) );
+#       next;
+#     }
+#
+#     # non-terminal jobs: next_ts defaults to " now " if missing/garbage
+#     my $next_ts = $job->{next_ts};
+#     $next_ts = $now if !defined( $next_ts ) || $next_ts !~ /^\d+$/;
+#
+#     my $wait = $next_ts - $now;
+#
+#     $app->log->debug(
+#             basename( __FILE__ ) . ":"
+#           . __LINE__
+#           . sprintf(
+# " Q->[JOB]  ih: %s status: %s stage: %s step_idx: %s next: %s now: %s wait: %+ ds ",
+#         short_ih( $ih ), $status,                $stage,
+#         $step_idx,       epoch2time( $next_ts ), epoch2time( $now ),
+#         $wait ) );
+#     next if $next_ts > $now;
+#
+#     my $steps = $job->{steps};
+#     if ( ref( $steps ) ne 'ARRAY' ) {
+#       $steps = [];
+#       $job->{steps} = $steps;
+#     }
+#
+#     # ---- TERMINAL: OUT OF STEPS -> DONE ----
+#     if ( $step_idx >= @$steps ) {
+#       _job_mark_done( $app, $job, $now );
+#       next;
+#     }
+#
+#     if ( @$steps ) {
+#       my $remain = @$steps - $step_idx;
+#       $remain = 0 if $remain < 0;
+#
+#       my $ops = join(
+#         ", ",
+#         map {
+#           ( ref( $_ ) eq 'HASH' )
+#               ? (
+#             $_->{op} // "
+#     ? " )
+#               : "
+#           ? "
+#         } @$steps[ $step_idx .. $#$steps ] );
+#
+#       $app->log->debug(   basename( __FILE__ ) . ":"
+#                         . __LINE__
+#                         . " Q->[PLAN] ih: "
+#                         . short_ih( $ih )
+#                         . " steps_remaining: $remain ops: [$ops] " );
+#     }
+#
+#     my $step = $steps->[$step_idx];
+#     if ( ref( $step ) ne 'HASH' ) {
+#       _job_mark_failed( $app, $job, $now,
+#                         " bad step at idx: $step_idx ( not a HASH ) " );
+#       next;
+#     }
+#
+#     $step->{tries} = 0 if !defined $step->{tries};
+#
+#     my $op = $step->{op} // '';
+#     $job->{stage} = $op;
+#
+#     my ( $result, $why, $hint ) =
+#         _run_step( $app, $qbt, $job, $step, $tick_cache );
+#
+#     $app->log->debug(   basename( __FILE__ ) . ":"
+#                       . __LINE__
+#                       . "  step ih: $ih op: $op result: $result why: "
+#                       . ( $why // '' ) );
+#
+#     if ( $result eq 'advance' ) {
+#       _job_advance_step( $job, $now );
+#       next;
+#     }
+#
+#     if ( $result eq 'retry' ) {
+#       my $rr = _job_retry_step( $app, $job, $step, $now, $why );
+#
+#       # If the retry handler decided this job now " needs_user ",
+#       # remove torrent from qBt (keep data) right now.
+#       if ( defined( $rr ) && $rr eq 'needs_user' ) {
+#         _qbt_remove_torrent( $app, $qbt, $ih, delete_files => 0 );
+#         next;
+#       }
+#
+#       next;
+#     }
+#
+#     if ( $result eq 'interactive' ) {
+#       _qbt_remove_torrent( $app, $qbt, $ih, delete_files => 0 );    # keep data
+#
+#       my $reason = $why  || 'unknown';
+#       my $detail = $hint || '';
+#
+#       _job_mark_needs_user( $app, $job, $now, $reason, $why, $detail );
+#       next;
+#     }
+#
+#     if ( $result eq 'renamed_root' ) {
+#
+#       # Otherwise: embrace failure → quarantine bucket
+#       _qbt_remove_torrent( $app, $qbt, $ih, delete_files => 0 );    # keep data
+#       _job_mark_renamed_root( $app, $job, $now, $why, $hint );
+#       next;
+#     }
+#
+# #######################################
+#     # this is the edge-case catcher.
+# #######################################
+#
+#     my $is_rename_symlink_class =
+#         ( ref( $job->{rename} ) eq 'HASH' ) || ( $job->{symlink_used} );
+#     if ( $is_rename_symlink_class ) {
+#       _job_mark_needs_triage(
+#                               $app,
+#                               $job,
+#                               $now,
+#                               'unexpected_result',
+#                               ( $why || " failed( result: $result ) " ),
+#                               " op = "
+#                                   . ( $job->{stage} // '' )
+#                                   . " step_idx = "
+#                                   . ( $job->{step_idx} // 0 ) );
+#       next;
+#     }
+#
+#     _job_mark_failed(
+#       $app, $job, $now, $why
+#           || " failed( result: $result )
+#           " );
+#   }
+
+#   return;
+# }
+# sub _qbt_temp_path_enabled_cached {
+#   my ( $qbt, $tick_cache ) = @_;
+#   $tick_cache ||= {};
+#   $tick_cache->{prefs} ||= {};
+#
+#   return $tick_cache->{prefs}{temp_path_enabled}
+#       if exists $tick_cache->{prefs}{temp_path_enabled};
+#
+#   # wrapper should implement this; see note below
+#   my $prefs = eval { $qbt->api_qbt_preferences() };
+#
+#   my $enabled = undef;
+#   if ( ref( $prefs ) eq 'HASH' && exists $prefs->{temp_path_enabled} ) {
+#     $enabled = $prefs->{temp_path_enabled} ? 1 : 0;
+#   }
+#
+#   $tick_cache->{prefs}{temp_path_enabled} = $enabled;    # can be undef
+#   return $enabled;
 # }

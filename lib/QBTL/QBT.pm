@@ -1,5 +1,9 @@
 package QBTL::QBT;
 use common::sense;
+use File::Basename qw(
+    basename
+    dirname
+);
 use HTTP::Cookies;
 use LWP::UserAgent;
 use Mojo::JSON qw( decode_json );
@@ -125,39 +129,32 @@ sub api_qbt_login {
 # referred to as api_qbt_<function> to not confuse it with $app-> stuff leter
 
 # ------------------------------
-sub api_qbt_preferences {
+sub api_app_preferences {
   my ( $self ) = @_;
 
   my $url = "$self->{base_url}/api/v2/app/preferences";
 
-  for my $try ( 1 .. 2 ) {
+  for my $attempt ( 1 .. 2 ) {
     my $res = $self->{ua}->get( $url );
 
-    if ( !$res->is_success ) {
-      my $code = $res->code // 0;
-
-      # if session expired/unauthorized, re-login once
-      if ( $try == 1 && ( $code == 401 || $code == 403 ) ) {
-        $self->api_qbt_login();    # should die on failure
-        next;
-      }
-
-      die "qbt GET /app/preferences failed: " . $res->status_line;
+    if ( $res->is_success ) {
+      my $prefs = eval { decode_json( $res->decoded_content ) };
+      die "GET app/preferences JSON decode failed: $@" if $@;
+      die "GET app/preferences did not return HASH"
+          unless ref( $prefs ) eq 'HASH';
+      return $prefs;
     }
 
-    my $body  = $res->decoded_content // '';
-    my $prefs = eval { decode_json( $body ) };
-    die "qbt GET /app/preferences JSON decode failed: $@"
-        if $@;
+    my $code = $res->code // 0;
 
-    die "qbt GET /app/preferences expected HASH got "
-        . ( ref( $prefs ) || 'SCALAR' )
-        unless ref( $prefs ) eq 'HASH';
+    # session expired -> login -> retry once
+    if ( ( $code == 401 || $code == 403 ) && $attempt == 1 ) {
+      $self->api_qbt_login();    # dies if it can't fix it
+      next;
+    }
 
-    return $prefs;
+    die "GET app/preferences failed: " . $res->status_line;
   }
-
-  die "unreachable";
 }
 
 # ------------------------------
@@ -479,6 +476,7 @@ sub _fail {
 
 sub _api_torrents_add__multipart {
   my ( $self, $torrent_path, $savepath ) = @_;
+
   unless ( defined $torrent_path && length $torrent_path ) {
     return $self->_fail( "missing torrent_path" );
   }

@@ -461,6 +461,91 @@ sub decode_torrent_utf8 {
   return defined( $out ) ? $out : $s;             # fallback: raw bytes
 }
 
+sub process_all_infohashes {
+  QBTL::Logger::debug( "# --- PROCESSING ALL INFOHASHES --- #" );
+  my ( $parsed, $opts ) = @_;
+  QBTL::Logger::info( "\n[MAIN] Starting process_all_infohashes()" );
+
+  QBTL::Logger::info( "Parsed keys: " . join( ", ", keys %$parsed ) );
+  my $infohashes = $parsed->{by_infohash};
+  my $count      = scalar keys %$infohashes;
+  QBTL::Logger::info( "[MAIN] Found $count unique torrents to process" );
+
+  foreach my $infohash ( sort keys %$infohashes ) {
+    my $meta = $infohashes->{$infohash};
+
+    #         QBTL::Logger::info(__LINE__ . " [INFOHASH] Processing $infohash "
+    #             . "($meta->{bucket}), $meta->{name}");
+
+    # --- Step 1: Verify source .torrent file still exists ---
+    unless ( -f $meta->{source_path} ) {
+      QBTL::Logger::warn( __LINE__
+              . "[INFOHASH:$infohash] Missing source file: $meta->{source_path}"
+      );
+      next;
+    }
+
+    # --- Step 2: Payload sanity checks (Utils::sanity_check_payload) ---
+    my $payload_ok = Utils::sanity_check_payload( $meta );
+    unless ( $payload_ok ) {
+      QBTL::Logger::warn( __LINE__
+               . "[INFOHASH:$infohash] Payload sanity check failed, skipping" );
+      next;
+    }
+
+#         # --- Step 3: Decide save_path ---
+#         my $save_path = Utils::determine_save_path($meta, $opts);
+#         QBTL::Logger::debug("[INFOHASH:$infohash] save_path = "
+#             . (defined $save_path ? $save_path : "(qBittorrent default)"));
+#
+#         # --- Step 4: Call qBittorrent API (stub for now) ---
+#         QBTL::Logger::info("[INFOHASH:$infohash] Would call QBT add_torrent: "
+#             . "source=$meta->{source_path}, save_path="
+#             . (defined $save_path ? $save_path : "QBT-default")
+#             . ", category=" . ($meta->{bucket} // "(none)"));
+#
+#         # TODO: $qbt->add_torrent($meta->{source_path}, $save_path, $meta->{bucket});
+  }
+
+  QBTL::Logger::info( "[MAIN] Finished process_all_infohashes()" );
+}
+
+
+# ---------------------------
+#       internal helpers
+# ---------------------------
+
+sub _assign_bucket {
+  my ( $path, $opts ) = @_;
+
+  # Check against each configured export_dir_fin
+  for my $cdir ( @{$opts->{export_dir_fin}} ) {
+    if ( index( $path, $cdir ) != -1 ) {
+      return basename( $cdir );    # dynamic bucket name
+    }
+  }
+
+  # Check against each configured export_dir
+  for my $ddir ( @{$opts->{export_dir}} ) {
+    if ( index( $path, $ddir ) != -1 ) {
+      return basename( $ddir );    # dynamic bucket name
+    }
+  }
+
+  # BT_backup (hardcoded, qBittorrent internal)
+  return 'BT_backup' if $path =~ /BT_backup/;
+
+  # Default fallback
+  return 'kitchen_sink';
+}
+
+sub _sh_single_quote {
+  my ( $s ) = @_;
+  $s //= '';
+  $s =~ s/'/'"'"'/g;
+  return "'$s'";
+}
+
 # sub normalize_filename {
 #   my ($l_parsed, $opts, $stats) = @_;
 #
@@ -516,54 +601,7 @@ sub decode_torrent_utf8 {
 #   return;
 # }
 
-sub process_all_infohashes {
-  QBTL::Logger::debug( "# --- PROCESSING ALL INFOHASHES --- #" );
-  my ( $parsed, $opts ) = @_;
-  QBTL::Logger::info( "\n[MAIN] Starting process_all_infohashes()" );
 
-  QBTL::Logger::info( "Parsed keys: " . join( ", ", keys %$parsed ) );
-  my $infohashes = $parsed->{by_infohash};
-  my $count      = scalar keys %$infohashes;
-  QBTL::Logger::info( "[MAIN] Found $count unique torrents to process" );
-
-  foreach my $infohash ( sort keys %$infohashes ) {
-    my $meta = $infohashes->{$infohash};
-
-    #         QBTL::Logger::info(__LINE__ . " [INFOHASH] Processing $infohash "
-    #             . "($meta->{bucket}), $meta->{name}");
-
-    # --- Step 1: Verify source .torrent file still exists ---
-    unless ( -f $meta->{source_path} ) {
-      QBTL::Logger::warn( __LINE__
-              . "[INFOHASH:$infohash] Missing source file: $meta->{source_path}"
-      );
-      next;
-    }
-
-    # --- Step 2: Payload sanity checks (Utils::sanity_check_payload) ---
-    my $payload_ok = Utils::sanity_check_payload( $meta );
-    unless ( $payload_ok ) {
-      QBTL::Logger::warn( __LINE__
-               . "[INFOHASH:$infohash] Payload sanity check failed, skipping" );
-      next;
-    }
-
-#         # --- Step 3: Decide save_path ---
-#         my $save_path = Utils::determine_save_path($meta, $opts);
-#         QBTL::Logger::debug("[INFOHASH:$infohash] save_path = "
-#             . (defined $save_path ? $save_path : "(qBittorrent default)"));
-#
-#         # --- Step 4: Call qBittorrent API (stub for now) ---
-#         QBTL::Logger::info("[INFOHASH:$infohash] Would call QBT add_torrent: "
-#             . "source=$meta->{source_path}, save_path="
-#             . (defined $save_path ? $save_path : "QBT-default")
-#             . ", category=" . ($meta->{bucket} // "(none)"));
-#
-#         # TODO: $qbt->add_torrent($meta->{source_path}, $save_path, $meta->{bucket});
-  }
-
-  QBTL::Logger::info( "[MAIN] Finished process_all_infohashes()" );
-}
 
 # sub q_add_queue {
 #   QBTL::Logger::debug("BUILDING QUEUE FOR ADDING TORRENTS");
@@ -626,40 +664,6 @@ sub process_all_infohashes {
 #   return "kitchen_sink_missing";
 # }
 
-# ---------------------------
-#       internal helpers
-# ---------------------------
-
-sub _assign_bucket {
-  my ( $path, $opts ) = @_;
-
-  # Check against each configured export_dir_fin
-  for my $cdir ( @{$opts->{export_dir_fin}} ) {
-    if ( index( $path, $cdir ) != -1 ) {
-      return basename( $cdir );    # dynamic bucket name
-    }
-  }
-
-  # Check against each configured export_dir
-  for my $ddir ( @{$opts->{export_dir}} ) {
-    if ( index( $path, $ddir ) != -1 ) {
-      return basename( $ddir );    # dynamic bucket name
-    }
-  }
-
-  # BT_backup (hardcoded, qBittorrent internal)
-  return 'BT_backup' if $path =~ /BT_backup/;
-
-  # Default fallback
-  return 'kitchen_sink';
-}
-
-sub _sh_single_quote {
-  my ( $s ) = @_;
-  $s //= '';
-  $s =~ s/'/'"'"'/g;
-  return "'$s'";
-}
 
 # sub _normalize_single {
 #   my ( $meta, $opts, $stats, $is_coll ) = @_;

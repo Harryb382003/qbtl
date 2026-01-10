@@ -226,14 +226,14 @@ sub _munge_savepath_and_root_rename {
   if ( @$files > 1 ) {
     $is_multi = 1;
   }
-  elsif ( @$files > 1 ) {
-    $is_multi = 1;
-  }
   else {
     for my $f ( @$files ) {
       next unless ref( $f ) eq 'HASH';
       my $p = $f->{path} // '';
-      if ( $p =~ m{/} ) { $is_multi = 1; last }
+      if ( $p =~ m{/} ) {
+        $is_multi = 1;
+        last;
+      }
     }
   }
 
@@ -241,7 +241,6 @@ sub _munge_savepath_and_root_rename {
   my $disk_file_dir   = dirname( $hit_path );          # .../Mei Satsuki
   my $disk_root_name  = basename( $disk_file_dir );    # Mei Satsuki
   my $disk_parent_dir = dirname( $disk_file_dir );     # .../M
-
   my $torrent_top_lvl =
       _torrent_top_lvl_from_rec( $rec );    # "Mei Satsuki minipack" ideally
   my $pending_root_rename_data;
@@ -269,15 +268,13 @@ sub _munge_savepath_and_root_rename {
       $savepath = $disk_file_dir;
     }
   }
-  warn "MUNGE: is_multi=$is_multi savepath_out=$savepath rename="
-      . (
-    ref( $pending_root_rename_data ) eq 'HASH'
-    ? "$pending_root_rename_data->{torrent_top_lvl}->$pending_root_rename_data->{drivespace_top_lvl}"
-    : "(none)"
-      ) . "\n";
+
+  #   warn(   "\t\t\t\t\t    "
+  #         . basename( __FILE__ ) . ":"
+  #         . __LINE__
+  #         . " MUNGE: is_multi: $is_multi savepath_out: $savepath" );
   return ( $savepath, $pending_root_rename_data );
 }
-
 
 sub _torrent_top_lvl_from_rec {
   my ( $rec ) = @_;
@@ -312,7 +309,7 @@ sub app {
   my $app = Mojolicious->new;
   QBTL::Logger::set_log_file( $opts->{log_file} || 'qbtl.log' );
   $app->log->level( 'debug' );
-  $app->log->debug( __LINE__ . " [Web] pid=$$" );
+  $app->log->debug( basename( __FILE__ ) . ":" . __LINE__ . " pid=$$" );
   $app->defaults->{dev_mode} = ( $opts->{dev_mode} ? 1 : 0 );
 
   my $root = $opts->{root_dir} || '.';
@@ -358,9 +355,8 @@ sub app {
   if ( $opts->{dev_mode} ) {
     require QBTL::Devel;
     QBTL::Devel::register_routes( $app, $opts );    # <-- IMPORTANT
-    $app->log->debug(   basename( __FILE__ ) . ":"
-                      . __LINE__
-                      . " [Web] Developer routes registered" );
+    $app->log->debug(
+       basename( __FILE__ ) . ":" . __LINE__ . " Developer routes registered" );
   }
 
   $r->get(
@@ -537,7 +533,7 @@ sub app {
       $c->app->log->debug( "add_one GET return_to_in="
                            . ( $c->param( 'return_to' ) // '(none)' ) );
 
-      $c->app->log->debug( "add_one GET return_to_ok="
+      $c->app->log->debug( "add_one GET return_to_ok: "
                            . ( $c->stash( 'return_to' ) // '(none)' ) );
       $c->stash( dev_mode => ( $opts->{dev_mode} ? 1 : 0 ) );
 
@@ -579,8 +575,8 @@ sub app {
       my $st = _add_one_state( $c->app );
 
       # Rebuild queue if empty OR cache has changed since queue build
-      if ( !@{$st->{queue} || []}
-           || ( ( $st->{cache_mtime} || 0 ) != ( $cache_mtime || 0 ) ) )
+      unless ( @{$st->{queue} || []}
+               || ( ( $st->{cache_mtime} || 0 ) != ( $cache_mtime || 0 ) ) )
       {
         _add_one_build_queue(
                               app         => $c->app,
@@ -605,7 +601,7 @@ sub app {
       if ( $want_hash ) {
         $pick_hash = $want_hash;
 
-        if ( !exists $local_by_ih->{$pick_hash} ) {
+        unless ( exists $local_by_ih->{$pick_hash} ) {
           return
               $c->render(
                  template => 'qbt_add_one',
@@ -685,7 +681,7 @@ sub app {
       my $confirm = $c->param( 'confirm' ) // '';
       my $retry   = $c->param( 'retry' )   // 0;    # hook only (unused for now)
 
-      if ( !$confirm ) {
+      unless ( $confirm ) {
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -696,7 +692,7 @@ sub app {
                         }, );
       }
 
-      if ( !$source_path ) {
+      unless ( $source_path ) {
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -737,8 +733,11 @@ sub app {
 
         _add_one_remove_hash( $c->app, $hash );
         my $st = _add_one_state( $c->app );
-        $app->log->debug( __LINE__
-              . " [Web] [add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+        $app->log->debug(
+                basename( __FILE__ ) . ":"
+              . __LINE__
+              . " [add_one] after remove ih: $hash idx: $st->{idx}
+queue_n: "
               . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
@@ -759,7 +758,8 @@ sub app {
         }
 
         my $msg =
-"Already exists in qBittorrent (stale queue or previously added): $hash";
+            "Already exists in qBittorrent (stale queue or previously added):"
+            . $hash;
 
         _add_one_mark_fail( $c->app, $hash, $msg );
 
@@ -771,9 +771,10 @@ sub app {
 
         _add_one_remove_hash( $c->app, $hash );
         my $st = _add_one_state( $c->app );
-        $app->log->debug( __LINE__
-              . " [Web] [add_one] after remove ih=$hash idx=$st->{idx} queue_n="
-              . scalar( @{$st->{queue} || []} ) );
+        $app->log->debug(   basename( __FILE__ ) . ":"
+                          . __LINE__
+                          . " AFTER REMOVE ih: $hash idx: $st->{idx} queue_n: "
+                          . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -786,8 +787,9 @@ sub app {
       my $ih_file = eval { _infohash_from_torrent_file( $source_path ) };
       $ih_file = $@ ? "(ih parse failed: $@)" : $ih_file;
 
-      $app->log->debug(   __LINE__
-                        . " [Web] preflight: size:$sz pick_hash: "
+      $app->log->debug(   basename( __FILE__ ) . ":"
+                        . __LINE__
+                        . "  PREFLIGHT: size:$sz pick_hash: "
                         . short_ih( $hash )
                         . " file_ih: "
                         . short_ih( $ih_file )
@@ -844,10 +846,18 @@ sub app {
                 . " dbg torrent_top_lvl=$torrent_top_dbg is_multi=$is_multi_dbg"
         );
 
-        if ( $hit_path ) {
+        if ( $hit_path ) {    # Setup for renaming the torrent root directory
+          my $rename_dbg;
+          my $munged_save_dbg;
           my $disk_file_dir_dbg   = dirname( $hit_path );
           my $disk_parent_dir_dbg = dirname( $disk_file_dir_dbg );
           my $disk_root_dbg       = basename( $disk_file_dir_dbg );
+
+          ( $munged_save_dbg, $rename_dbg ) =
+              _munge_savepath_and_root_rename(
+                                               rec      => $rec,
+                                               hit_path => $hit_path,
+                                               savepath => $savepath, );
 
           $app->log->debug(   basename( __FILE__ ) . ":"
                             . __LINE__
@@ -858,16 +868,6 @@ sub app {
           $app->log->debug(   basename( __FILE__ ) . ":"
                             . __LINE__
                             . " dbg disk_root_name=$disk_root_dbg" );
-
-          my $rename_dbg;
-          my $munged_save_dbg;
-
-          ( $munged_save_dbg, $rename_dbg ) =
-              _munge_savepath_and_root_rename(
-                                               rec      => $rec,
-                                               hit_path => $hit_path,
-                                               savepath => $savepath, );
-
           $app->log->debug(   basename( __FILE__ ) . ":"
                             . __LINE__
                             . " dbg savepath_before=$savepath" );
@@ -879,26 +879,26 @@ sub app {
           if ( ref( $rename_dbg ) eq 'HASH' ) {
             $app->log->debug( basename( __FILE__ ) . ":"
                       . __LINE__
-                      . " dbg rename_intent="
+                      . " dbg rename_intent: "
                       . ( $rename_dbg->{torrent_top_lvl} // '(undef)' ) . " -> "
                       . ( $rename_dbg->{drivespace_top_lvl} // '(undef)' ) );
+
+            $savepath                 = $munged_save_dbg if $munged_save_dbg;
+            $pending_root_rename_data = $rename_dbg;
           }
           else {
             $app->log->debug(   basename( __FILE__ ) . ":"
                               . __LINE__
-                              . " dbg rename_intent=(none)" );
-          }
-
-          if ( ref( $rename_dbg ) eq 'HASH' ) {
-            $savepath                 = $munged_save_dbg if $munged_save_dbg;
-            $pending_root_rename_data = $rename_dbg;
+                              . " dbg rename_intent: (none)" );
           }
         }
 
         if ( length $hit_path ) {
-          $app->log->debug(
-"DEBUG: about to call _munge_savepath_and_root_rename hash=$hash hit_path=$hit_path"
-          );
+
+#           $app->log->debug( basename( __FILE__ ) . ":"
+#             . __LINE__
+#             . " DEBUG: about to call _munge_savepath_and_root_rename - hit_path: $hit_path"
+#           );
 
           ( $savepath, $pending_root_rename_data ) =
               _munge_savepath_and_root_rename(
@@ -906,9 +906,10 @@ sub app {
                                                hit_path => $hit_path,
                                                savepath => $savepath, );
 
-          $app->log->debug(
-"DEBUG: about to call _munge_savepath_and_root_rename hash=$hash hit_path=$hit_path"
-          );
+          $app->log->debug( basename( __FILE__ ) . ":"
+                     . __LINE__
+                     . " DEBUG: about to call _munge_savepath_and_root_rename  "
+                     . " hit_path: $hit_path" );
 
           if ( ref( $pending_root_rename_data ) eq 'HASH' ) {
             $rec->{pending_root_rename_data} = $pending_root_rename_data;
@@ -916,15 +917,14 @@ sub app {
         }
 
         $app->log->debug(
-                basename( __FILE__ ) . ":"
-              . __LINE__
-              . " savepath_final=$savepath why=$why"
-              . (
-            ref( $pending_root_rename_data ) eq 'HASH'
-            ? " rename_root $pending_root_rename_data->{torrent_top_lvl} ->
-$pending_root_rename_data->{drivespace_top_lvl}"
-            : "" )
-              . ( length( $hit_path ) ? " hit=$hit_path" : "" ) );
+                  basename( __FILE__ ) . ":"
+                . __LINE__
+                . " savepath_final: $savepath "
+                . (
+              ref( $pending_root_rename_data ) eq 'HASH'
+              ? " rename_root: $pending_root_rename_data->{torrent_top_lvl} -> "
+                  . $pending_root_rename_data->{drivespace_top_lvl}
+              : "" ) );
 
         $add = $qbt->api_torrents_add( $source_path, $savepath );
         die "add returned non-hash" unless ref( $add ) eq 'HASH';
@@ -932,7 +932,7 @@ $pending_root_rename_data->{drivespace_top_lvl}"
         1;
       };
 
-      if ( !$ok ) {
+      unless ( $ok ) {
         $app->log->error( "DEBUG: eval failed in add_one: $@" );
         my $err = "$@";
         chomp $err;
@@ -948,8 +948,9 @@ $pending_root_rename_data->{drivespace_top_lvl}"
 
         _add_one_remove_hash( $c->app, $hash );
         my $st = _add_one_state( $c->app );
-        $app->log->debug( __LINE__
-              . " [Web] [add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+        $app->log->debug(
+          basename( __FILE__ ) . ":" . __LINE__ . "
+ [add_one] after remove ih: $hash idx: $st->{idx} queue_n: "
               . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
@@ -960,11 +961,12 @@ $pending_root_rename_data->{drivespace_top_lvl}"
       }
 
       my $body = $add->{body} // '';
-      $app->log->debug( __LINE__
-        . " Web add_one: ok=$add->{ok} code=$add->{code} body=$body savepath=$savepath"
+      $app->log->debug( basename( __FILE__ ) . ":"
+        . __LINE__
+        . " add_one: ok: $add->{ok} code=$add->{code} body: $body savepath: $savepath"
       );
 
-      if ( !$add->{ok} ) {
+      unless ( $add->{ok} ) {
         my $err = "Add failed: HTTP $add->{code} $body";
         _add_one_mark_fail( $c->app, $hash, $err );
 
@@ -977,9 +979,10 @@ $pending_root_rename_data->{drivespace_top_lvl}"
 
         _add_one_remove_hash( $c->app, $hash );
         my $st = _add_one_state( $c->app );
-        $app->log->debug( __LINE__
-              . " [Web] [add_one] after remove ih=$hash idx=$st->{idx} queue_n="
-              . scalar( @{$st->{queue} || []} ) );
+        $app->log->debug( basename( __FILE__ ) . ":"
+                 . __LINE__
+                 . " [add_one] after remove ih: $hash idx: $st->{idx} queue_n: "
+                 . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -1001,8 +1004,9 @@ $pending_root_rename_data->{drivespace_top_lvl}"
 
         _add_one_remove_hash( $c->app, $hash );
         my $st = _add_one_state( $c->app );
-        $app->log->debug( __LINE__
-              . " [Web] [add_one] after remove ih=$hash idx=$st->{idx} queue_n="
+        $app->log->debug(
+          basename( __FILE__ ) . ":" . __LINE__ . "
+ [add_one] after remove ih: $hash idx: $st->{idx} queue_n: "
               . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
@@ -1018,20 +1022,19 @@ $pending_root_rename_data->{drivespace_top_lvl}"
       if (    ref( $rec ) eq 'HASH'
            && ref( $rec->{pending_root_rename_data} ) eq 'HASH' )
       {
-        $pending_root_rename_data = $rec->{pending_root_rename_data};
+        $pending_root_rename_data = {%{$rec->{pending_root_rename_data}}};
       }
 
       my $rr_dbg = '(none)';
-      if (    ref( $rec ) eq 'HASH'
-           && ref( $rec->{pending_root_rename_data} ) eq 'HASH' )
-      {
-        my $rr = $rec->{pending_root_rename_data};
-        $rr_dbg = ( $rr->{torrent_top_lvl} // '?' ) . " -> "
-            . ( $rr->{drivespace_top_lvl} // '?' );
-      }
+if (ref($pending_root_rename_data) eq 'HASH') {
+  $rr_dbg = ($pending_root_rename_data->{torrent_top_lvl}    // '?')
+          . " -> "
+          . ($pending_root_rename_data->{drivespace_top_lvl} // '?');
+}
 
-      $app->log->debug(
-             basename( __FILE__ ) . ":" . __LINE__ . " rename_intent=$rr_dbg" );
+      $app->log->debug(   basename( __FILE__ ) . ":"
+                        . __LINE__
+                        . " rename_intent: $rr_dbg\n", );
 
       QBTL::Queue->enqueue_add_one(
                           $c->app, $hash,
@@ -1049,10 +1052,11 @@ $pending_root_rename_data->{drivespace_top_lvl}"
 
       _add_one_remove_hash( $c->app, $hash );
       my $st = _add_one_state( $c->app );
+
       $app->log->debug( basename( __FILE__ ) . ":"
                  . __LINE__
                  . " [add_one] after remove ih: $hash idx: $st->{idx} queue_n: "
-                 . scalar( @{$st->{queue} || []} ) );
+                 . scalar( @{$st->{queue} || []} . "\n\n" ) );
       $c->app->defaults->{qbt_snap_ts} = 0;
 
       my $return_to = $c->param( 'return_to' ) // '';
