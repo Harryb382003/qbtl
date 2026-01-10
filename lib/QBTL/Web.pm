@@ -11,6 +11,10 @@ use Mojo::JSON qw(true);
 use QBTL::LocalCache;
 use QBTL::QBT;
 use QBTL::Queue;
+use QBTL::SavePath qw(
+    munge_savepath_and_root_rename
+    torrent_top_lvl_from_rec
+);
 use QBTL::Utils qw(
     start_timer
     stop_timer
@@ -205,89 +209,6 @@ sub _infohash_from_torrent_file {
       unless ref( $t ) eq 'HASH' && ref( $t->{info} ) eq 'HASH';
   my $info_bencoded = Bencode::bencode( $t->{info} );
   return sha1_hex( $info_bencoded );
-}
-
-sub _munge_savepath_and_root_rename {
-  my ( %args ) = @_;
-  my $rec      = $args{rec};
-  my $hit_path = $args{hit_path} // '';
-  my $savepath = $args{savepath} // '';
-
-  return ( $savepath, undef ) unless ref( $rec ) eq 'HASH';
-  return ( $savepath, undef ) unless length $hit_path;
-
-  my $files = $rec->{files};
-  $files = [] unless ref( $files ) eq 'ARRAY';
-
-# "multi" if:
-#  - more than one file, OR
-#  - any file path contains a slash (root-dir style), which implies a directory context
-  my $is_multi = 0;
-  if ( @$files > 1 ) {
-    $is_multi = 1;
-  }
-  else {
-    for my $f ( @$files ) {
-      next unless ref( $f ) eq 'HASH';
-      my $p = $f->{path} // '';
-      if ( $p =~ m{/} ) {
-        $is_multi = 1;
-        last;
-      }
-    }
-  }
-
-  # directory containing the hit file on disk
-  my $disk_file_dir   = dirname( $hit_path );          # .../Mei Satsuki
-  my $disk_root_name  = basename( $disk_file_dir );    # Mei Satsuki
-  my $disk_parent_dir = dirname( $disk_file_dir );     # .../M
-  my $torrent_top_lvl =
-      _torrent_top_lvl_from_rec( $rec );    # "Mei Satsuki minipack" ideally
-  my $pending_root_rename_data;
-
-  if ( $is_multi ) {
-
-# For multi-file torrents: savepath must be the parent so qbt will create the root folder itself.
-    if ( length $disk_parent_dir ) {
-      $savepath = $disk_parent_dir;
-    }
-
-# If torrent's top folder name differs from disk folder name, queue a root rename.
-    if (    length( $torrent_top_lvl )
-         && length( $disk_root_name )
-         && $torrent_top_lvl ne $disk_root_name )
-    {
-      $pending_root_rename_data = {
-                                   torrent_top_lvl    => $torrent_top_lvl,
-                                   drivespace_top_lvl => $disk_root_name,};
-    }
-  }
-  else {
-    # Single-file torrent: savepath should be the directory containing the file.
-    if ( length $disk_file_dir ) {
-      $savepath = $disk_file_dir;
-    }
-  }
-
-  #   warn(   "\t\t\t\t\t    "
-  #         . basename( __FILE__ ) . ":"
-  #         . __LINE__
-  #         . " MUNGE: is_multi: $is_multi savepath_out: $savepath" );
-  return ( $savepath, $pending_root_rename_data );
-}
-
-sub _torrent_top_lvl_from_rec {
-  my ( $rec ) = @_;
-  return '' unless ref( $rec ) eq 'HASH';
-  my $files = $rec->{files};
-  return '' unless ref( $files ) eq 'ARRAY' && @$files;
-
-  my $p = $files->[0]{path} // '';
-  return '' unless length $p;
-
-  # top-level is the first path segment
-  my ( $top ) = split m{/}, $p, 2;
-  return $top // '';
 }
 
 sub _is_multi_file_torrent {
@@ -839,7 +760,7 @@ queue_n: "
                           . " dbg hit_path="
                           . ( $hit_path || '(empty)' ) );
 
-        my $torrent_top_dbg = _torrent_top_lvl_from_rec( $rec );
+        my $torrent_top_dbg = torrent_top_lvl_from_rec( $rec );
         my $is_multi_dbg    = _is_multi_file_torrent( $rec ) ? 1 : 0;
         $app->log->debug( basename( __FILE__ ) . ":"
                 . __LINE__
@@ -854,10 +775,10 @@ queue_n: "
           my $disk_root_dbg       = basename( $disk_file_dir_dbg );
 
           ( $munged_save_dbg, $rename_dbg ) =
-              _munge_savepath_and_root_rename(
-                                               rec      => $rec,
-                                               hit_path => $hit_path,
-                                               savepath => $savepath, );
+              munge_savepath_and_root_rename(
+                                              rec      => $rec,
+                                              hit_path => $hit_path,
+                                              savepath => $savepath, );
 
           $app->log->debug(   basename( __FILE__ ) . ":"
                             . __LINE__
@@ -897,19 +818,19 @@ queue_n: "
 
 #           $app->log->debug( basename( __FILE__ ) . ":"
 #             . __LINE__
-#             . " DEBUG: about to call _munge_savepath_and_root_rename - hit_path: $hit_path"
+#             . " DEBUG: about to call munge_savepath_and_root_rename - hit_path: $hit_path"
 #           );
 
           ( $savepath, $pending_root_rename_data ) =
-              _munge_savepath_and_root_rename(
-                                               rec      => $rec,
-                                               hit_path => $hit_path,
-                                               savepath => $savepath, );
+              munge_savepath_and_root_rename(
+                                              rec      => $rec,
+                                              hit_path => $hit_path,
+                                              savepath => $savepath, );
 
           $app->log->debug( basename( __FILE__ ) . ":"
-                     . __LINE__
-                     . " DEBUG: about to call _munge_savepath_and_root_rename  "
-                     . " hit_path: $hit_path" );
+                      . __LINE__
+                      . " DEBUG: about to call munge_savepath_and_root_rename  "
+                      . " hit_path: $hit_path" );
 
           if ( ref( $pending_root_rename_data ) eq 'HASH' ) {
             $rec->{pending_root_rename_data} = $pending_root_rename_data;
@@ -1026,11 +947,11 @@ queue_n: "
       }
 
       my $rr_dbg = '(none)';
-if (ref($pending_root_rename_data) eq 'HASH') {
-  $rr_dbg = ($pending_root_rename_data->{torrent_top_lvl}    // '?')
-          . " -> "
-          . ($pending_root_rename_data->{drivespace_top_lvl} // '?');
-}
+      if ( ref( $pending_root_rename_data ) eq 'HASH' ) {
+        $rr_dbg =
+              ( $pending_root_rename_data->{torrent_top_lvl} // '?' ) . " -> "
+            . ( $pending_root_rename_data->{drivespace_top_lvl} // '?' );
+      }
 
       $app->log->debug(   basename( __FILE__ ) . ":"
                         . __LINE__
