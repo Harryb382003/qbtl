@@ -815,22 +815,16 @@ queue_n: "
         }
 
         if ( length $hit_path ) {
-
-#           $app->log->debug( basename( __FILE__ ) . ":"
-#             . __LINE__
-#             . " DEBUG: about to call munge_savepath_and_root_rename - hit_path: $hit_path"
-#           );
+          $app->log->debug( basename( __FILE__ ) . ":"
+                      . __LINE__
+                      . " DEBUG: about to call munge_savepath_and_root_rename  "
+                      . " hit_path: $hit_path" );
 
           ( $savepath, $pending_root_rename_data ) =
               munge_savepath_and_root_rename(
                                               rec      => $rec,
                                               hit_path => $hit_path,
                                               savepath => $savepath, );
-
-          $app->log->debug( basename( __FILE__ ) . ":"
-                      . __LINE__
-                      . " DEBUG: about to call munge_savepath_and_root_rename  "
-                      . " hit_path: $hit_path" );
 
           if ( ref( $pending_root_rename_data ) eq 'HASH' ) {
             $rec->{pending_root_rename_data} = $pending_root_rename_data;

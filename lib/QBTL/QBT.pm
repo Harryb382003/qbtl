@@ -283,16 +283,6 @@ sub api_torrents_files {
   }
 }
 
-# sub api_torrents_files {
-#   my ( $self, $hash ) = @_;
-#   $self->_validate_hash( $hash );
-#
-#   my $out = $self->_api_get_json( "/api/v2/torrents/files?hash=$hash" );
-#   return $out unless $out->{ok};
-#
-#   return $out->{json};    # arrayref of file hashes
-# }
-
 sub api_torrents_infohash_map {
   my ( $self ) = @_;
 
@@ -444,6 +434,37 @@ sub api_torrents_renameFile {
                               oldPath => $oldPath,
                               newPath => $newPath
                              }, );
+}
+
+sub api_torrents_stop {
+  my ( $self, $hashes ) = @_;
+
+  # Accept: scalar ih, arrayref of ih, or "all"
+  my $h = '';
+
+  if ( !defined $hashes ) {
+    return
+        $self->_fail( "stop: missing hashes",
+                      {ok => 0, code => 0, body => "missing hashes"} );
+  }
+  elsif ( ref( $hashes ) eq 'ARRAY' ) {
+    my @hh = grep { defined( $_ ) && length( $_ ) } @$hashes;
+    $h = join( '|', @hh );
+  }
+  else {
+    $h = "$hashes";
+  }
+
+  $h =~ s/\s+//g;
+
+# qBittorrent supports "all", otherwise require one-or-more 40-hex separated by |
+  if ( $h ne 'all' && $h !~ /\A[0-9a-f]{40}(?:\|[0-9a-f]{40})*\z/i ) {
+    return
+        $self->_fail( "stop: bad hashes: [$h]",
+                      {ok => 0, code => 0, body => "bad hashes: [$h]"} );
+  }
+
+  return $self->_api_post_form( '/api/v2/torrents/stop', {hashes => $h} );
 }
 
 sub _validate_hash {
