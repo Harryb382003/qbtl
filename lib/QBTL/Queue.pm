@@ -359,8 +359,6 @@ sub pump_tick {
   my $jobs = _jobs_ref( $app );
   my $sum  = _jobs_summary( $jobs );
 
-#   $app->log->debug(
-#            basename( __FILE__ ) . ":" . __LINE__ . " [queue] pump_tick: $sum" );
   return unless %$jobs;
 
   my $qbt;
@@ -376,7 +374,6 @@ sub pump_tick {
   my $tick_cache = {};     # per invocation cache
 
   # ---- qBt prefs snapshot (once per tick) ----
-  # Only used for symlink bridge + needs_user re-init gating.
   my $temp_enabled = undef;    # 1|0|undef
   my $prefs_ok     = eval {
     my $prefs = $qbt->api_app_preferences();    # HASH
@@ -395,10 +392,8 @@ sub pump_tick {
 
   $tick_cache->{prefs} ||= {};
   $tick_cache->{prefs}{temp_path_enabled} = $temp_enabled;
-  $app->log->debug(   basename( __FILE__ ) . ":"
-                    . __LINE__ . " TPE:"
-                    . ( defined( $temp_enabled ) ? $temp_enabled : '(undef)' )
-                    . " pump_tick: $sum" );
+
+  my $tick_prefix = basename( __FILE__ ) . ":" . __LINE__ . " pump_tick: $sum";
 
   for my $ih ( sort keys %$jobs ) {
     my $job = $jobs->{$ih};
@@ -406,21 +401,33 @@ sub pump_tick {
 
     # ---- LATCH prefs onto the job (single source of truth for this job) ----
     # Do this every tick so it stays coherent even if prefs flip mid-run.
-    $job->{temp_path_enabled} = $temp_enabled
-        if defined $temp_enabled;
+    $job->{temp_path_enabled} = $temp_enabled if defined $temp_enabled;
 
-# ---- If plan doesn't exist yet, it'll be built later; we still want flip detection ----
-    my $tpe_now  = $job->{temp_path_enabled};    # 1|0|undef
-    my $tpe_plan = $job->{plan_tpe};    # 1|0|undef (set when plan is built)
+    my $rename_required = ( ref( $job->{rename} ) eq 'HASH' ) ? 1 : 0;
+    my $enabled         = $job->{temp_path_enabled};    # 1|0|undef
 
-    # Detect prefs flip ONLY when both sides are known
-    if ( defined( $tpe_plan ) && defined( $tpe_now ) && $tpe_plan != $tpe_now )
-    {
+    # ---- bridged = enabled && rename_required (computed from job only) ----
+    my $bridged =
+        ( defined( $enabled ) && $enabled && $rename_required )
+        ? 1
+        : 0;
+
+    # Persist $bridged so later branches (retry/interactive) are coherent.
+    $job->{bridged} = $bridged;
+
+  # ---- Prefs flip detection: compare "planned" bridged vs current bridged ----
+  # plan_bridged is latched when the plan is built (see below).
+    my $br_now  = $job->{bridged};         # 1|0
+    my $br_plan = $job->{plan_bridged};    # 1|0|undef
+
+    if ( defined( $br_plan ) && $br_plan != $br_now ) {
 
       # avoid re-injecting every tick
       if ( !$job->{parachute_injected} ) {
         $job->{parachute_injected} = 1;
-        $job->{parachute_reason}   = "TPE flip ($tpe_plan -> $tpe_now)";
+        $job->{parachute_reason} =
+            "BR flip ($br_plan -> $br_now) (tpe="
+            . ( defined( $enabled ) ? $enabled : '(undef)' ) . ")";
 
         # splice parachute as NEXT op and skip the rest
         my $si    = $job->{step_idx} // 0;
@@ -437,26 +444,19 @@ sub pump_tick {
 
         # run ASAP
         $job->{next_ts} = $now;
-        $app->log->debug(   "\n##########################################"
-                          . "\n\tPARACHUTE NEEDED"
-                          . "\n##########################################"
-                          . "\n\tshort_ih$(ih) "
+
+        $app->log->debug(   basename( __FILE__ ) . ":"
+                          . __LINE__
+                          . "\n######################################"
+                          . "\n\tPARACHUTE_NEEDED"
+                          . "\n######################################"
+                          . "\n\tih="
+                          . short_ih( $ih ) . " "
                           . ( $job->{parachute_reason} // '' ) );
       }
     }
 
-    # ---- bridged = enabled && rename_required (computed from job only) ----
-    my $rename_required = ( ref( $job->{rename} ) eq 'HASH' ) ? 1 : 0;
-    my $enabled         = $job->{temp_path_enabled};    # 1|0|undef
-    my $bridged =
-        ( defined( $enabled ) && $enabled && $rename_required )
-        ? 1
-        : 0;
-
-    # Persist $bridged so later branches (retry/interactive) are coherent.
-    $job->{bridged} = $bridged;
-
-    # plan build happens ONLY after prefs are latched
+    # ---- Plan build happens ONLY after prefs are latched ----
     if (    $job->{plan_needed}
          || ref( $job->{steps} ) ne 'ARRAY'
          || !@{$job->{steps}} )
@@ -465,6 +465,10 @@ sub pump_tick {
       $job->{step_idx}    = 0;
       $job->{stage}       = 'queued';
       $job->{plan_needed} = 0;
+
+      # Latch plan-time values (used for flip detection)
+      $job->{plan_tpe}     = $enabled if defined $enabled;
+      $job->{plan_bridged} = $bridged;
 
       $app->log->debug(   basename( __FILE__ ) . ":"
                         . __LINE__
@@ -497,48 +501,55 @@ sub pump_tick {
           delete $job->{recheck_last_check0};
           delete $job->{stability_probe_inserted};
 
-          $app->log->debug(   "[queue] reinit needs_user ih: "
+          # allow future parachutes if it flips again
+          delete $job->{parachute_injected};
+          delete $job->{parachute_reason};
+
+          $app->log->debug(   basename( __FILE__ ) . ":"
+                            . __LINE__
+                            . " reinit needs_user ih: "
                             . short_ih( $ih )
                             . " reason=$reason (temp_path_enabled=0)" );
         }
       }
     }
-
     my $status   = $job->{status}   // '';
     my $stage    = $job->{stage}    // '';
     my $step_idx = $job->{step_idx} // 0;
+
+    # non-terminal jobs: next_ts defaults to now if missing/garbage
+    my $next_ts = $job->{next_ts};
+    $next_ts = $now if !defined( $next_ts ) || $next_ts !~ /^\d+$/;
+
+    my $wait = $next_ts - $now;
+
+    # Unified per-job-per-tick line: BR + pump_tick + JOB
+    $app->log->debug(  basename( __FILE__ ) . ":"
+                     . __LINE__ . " BR:"
+                     . ( $job->{bridged} ? 1 : 0 ) . " "
+                     . $tick_prefix
+                     . " [JOB] ih="
+                     . short_ih( $ih )
+                     . " status=$status stage=$stage step_idx=$step_idx" . " F="
+                     . epoch2time( $next_ts )
+                     . " wait="
+                     . sprintf( "%+ds", $wait ) );
 
     my $is_terminal = ( $status =~ /^(done|failed|needs_user|needs_triage)$/ );
     if ( $is_terminal ) {
       delete $job->{next_ts};
 
+      # log terminal only once, but keep the unified line above every tick
       next if $job->{terminal_logged};
       $job->{terminal_logged} = 1;
 
-      $app->log->debug(
-           sprintf(
-                 basename( __FILE__ ) . ":"
-                     . __LINE__
-                     . " [JOB] ih=%s status=%s stage=%s step_idx=%s (terminal)",
-                 short_ih( $ih ),
-                 $status, $stage, $step_idx ) );
+      $app->log->debug( basename( __FILE__ ) . ":"
+               . __LINE__
+               . " [JOB] ih="
+               . short_ih( $ih )
+               . " status=$status stage=$stage step_idx=$step_idx (terminal)" );
       next;
     }
-
-    # non-terminal jobs: next_ts defaults to now if missing/garbage
-    my $next_ts = $job->{next_ts};
-    $next_ts = $now if !defined( $next_ts ) || $next_ts !~ /^\d+$/;    # FIXED
-
-    my $wait = $next_ts - $now;
-
-    $app->log->debug(
-      sprintf(
-        basename( __FILE__ ) . ":"
-            . __LINE__
-            . " [JOB] ih=%s status=%s stage=%s step_idx=%s next=%s now=%s wait=%+ds",
-        short_ih( $ih ), $status,                $stage,
-        $step_idx,       epoch2time( $next_ts ), epoch2time( $now ),
-        $wait ) );
 
     next if $next_ts > $now;
 
@@ -558,10 +569,16 @@ sub pump_tick {
       my $remain = @$steps - $step_idx;
       $remain = 0 if $remain < 0;
 
-      my $ops = join(
-                     ", ",
-                     map { ( ref( $_ ) eq 'HASH' ) ? ( $_->{op} // "?" ) : "?" }
-                          @$steps[ $step_idx .. $#$steps ] );
+      my @ops = map { ( ref( $_ ) eq 'HASH' ) ? ( $_->{op} // "?" ) : "?" }
+          @$steps[ $step_idx .. $#$steps ];
+
+      my $ops;
+      if ( @ops <= 4 ) {
+        $ops = join( ", ", @ops );
+      }
+      else {
+        $ops = join( ", ", @ops[ 0 .. 2 ] ) . ", ..., " . $ops[-1];
+      }
 
       $app->log->debug(   basename( __FILE__ ) . ":"
                         . __LINE__
@@ -612,8 +629,6 @@ sub pump_tick {
 
     if ( $result eq 'interactive' ) {
 
-      # bridge worldview owns “embrace failure” cleanup semantics
-      # delete torrent ONLY when bridge was actually in play
       if ( $bridged ) {
         _bless_paths( $app, $qbt, $job, $tick_cache );
         _qbt_remove_torrent( $app, $qbt, $ih, delete_files => 0 );
