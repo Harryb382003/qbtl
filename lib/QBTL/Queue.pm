@@ -349,6 +349,17 @@ sub _renamed_root_ref {
   return $app->defaults->{queue_renamed_root};
 }
 
+sub _bridged_now {
+  my ( $job ) = @_;
+  return undef unless ref( $job ) eq 'HASH';
+
+  my $tpe = $job->{temp_path_enabled};    # undef|0|1
+  return undef unless defined $tpe;
+
+  my $rename_required = ( ref( $job->{rename} ) eq 'HASH' ) ? 1 : 0;
+  return ( $tpe && $rename_required ) ? 1 : 0;
+}
+
 # ------------------------------
 # Tick runner
 # ------------------------------
@@ -399,37 +410,36 @@ sub pump_tick {
     my $job = $jobs->{$ih};
     next if ref( $job ) ne 'HASH';
 
-    # ---- LATCH prefs onto the job (single source of truth for this job) ----
-    # Do this every tick so it stays coherent even if prefs flip mid-run.
+    # ---- LATCH prefs onto the job (single source of truth for this tick) ----
     $job->{temp_path_enabled} = $temp_enabled if defined $temp_enabled;
 
-    my $rename_required = ( ref( $job->{rename} ) eq 'HASH' ) ? 1 : 0;
+    # ---- REQUIRED: keep THESE TWO vars alive for the whole loop body ----
     my $enabled         = $job->{temp_path_enabled};    # 1|0|undef
+    my $rename_required = ( ref( $job->{rename} ) eq 'HASH' ) ? 1 : 0;
+    my $bridged;
+    $bridged = ( $enabled && $rename_required ) ? 1 : 0 if defined $enabled;
 
-    # ---- bridged = enabled && rename_required (computed from job only) ----
-    my $bridged =
-        ( defined( $enabled ) && $enabled && $rename_required )
-        ? 1
-        : 0;
+    # Persist BR for downstream branches + logging (only when knowable)
+    $job->{bridged} = $bridged if defined $bridged;
 
-    # Persist $bridged so later branches (retry/interactive) are coherent.
-    $job->{bridged} = $bridged;
+    # ---- ARM plan_br ONCE (first time BR is knowable) ----
+    if ( !defined( $job->{plan_br} ) && defined $bridged ) {
+      $job->{plan_br}  = $bridged;
+      $job->{plan_tpe} = $enabled;    # debug only
+    }
 
-  # ---- Prefs flip detection: compare "planned" bridged vs current bridged ----
-  # plan_bridged is latched when the plan is built (see below).
-    my $br_now  = $job->{bridged};         # 1|0
-    my $br_plan = $job->{plan_bridged};    # 1|0|undef
+    # ---- Detect BR flip (only when both sides are known) ----
+    if (    defined( $job->{plan_br} )
+         && defined( $bridged )
+         && $job->{plan_br} != $bridged )
+    {
 
-    if ( defined( $br_plan ) && $br_plan != $br_now ) {
-
-      # avoid re-injecting every tick
-      if ( !$job->{parachute_injected} ) {
+      unless ( $job->{parachute_injected} ) {
         $job->{parachute_injected} = 1;
         $job->{parachute_reason} =
-            "BR flip ($br_plan -> $br_now) (tpe="
-            . ( defined( $enabled ) ? $enabled : '(undef)' ) . ")";
+            "BR flip ($job->{plan_br} -> $bridged) (tpe="
+            . ( defined( $enabled ) ? $enabled : 'undef' ) . ")";
 
-        # splice parachute as NEXT op and skip the rest
         my $si    = $job->{step_idx} // 0;
         my $steps = $job->{steps};
 
@@ -442,21 +452,20 @@ sub pump_tick {
           $job->{step_idx} = 0;
         }
 
-        # run ASAP
         $job->{next_ts} = $now;
 
         $app->log->debug(   basename( __FILE__ ) . ":"
                           . __LINE__
                           . "\n######################################"
-                          . "\n\tPARACHUTE_NEEDED"
-                          . "\n######################################"
-                          . "\n\tih="
-                          . short_ih( $ih ) . " "
+                          . "\n\tPARACHUTE_NEEDED ih="
+                          . short_ih( $ih ) . "\n\t"
                           . ( $job->{parachute_reason} // '' ) );
       }
     }
 
     # ---- Plan build happens ONLY after prefs are latched ----
+    # IMPORTANT: do NOT overwrite plan_br here (plan_br is ARMED ONCE above)
+
     if (    $job->{plan_needed}
          || ref( $job->{steps} ) ne 'ARRAY'
          || !@{$job->{steps}} )
@@ -466,15 +475,13 @@ sub pump_tick {
       $job->{stage}       = 'queued';
       $job->{plan_needed} = 0;
 
-      # Latch plan-time values (used for flip detection)
-      $job->{plan_tpe}     = $enabled if defined $enabled;
-      $job->{plan_bridged} = $bridged;
-
       $app->log->debug(   basename( __FILE__ ) . ":"
                         . __LINE__
                         . " planned ih: "
                         . short_ih( $ih )
-                        . " bridged=$bridged enabled="
+                        . " bridged="
+                        . ( defined( $bridged ) ? $bridged : '(undef)' )
+                        . " enabled="
                         . ( defined( $enabled ) ? $enabled : '(undef)' )
                         . " rename_required=$rename_required steps="
                         . scalar( @{$job->{steps} || []} ) );
@@ -501,9 +508,12 @@ sub pump_tick {
           delete $job->{recheck_last_check0};
           delete $job->{stability_probe_inserted};
 
-          # allow future parachutes if it flips again
+          # ---- REQUIRED RESETS (rebase reality) ----
+          delete $job->{plan_br};
+          delete $job->{plan_tpe};
           delete $job->{parachute_injected};
           delete $job->{parachute_reason};
+          $job->{plan_needed} = 1;
 
           $app->log->debug(   basename( __FILE__ ) . ":"
                             . __LINE__
@@ -513,6 +523,7 @@ sub pump_tick {
         }
       }
     }
+
     my $status   = $job->{status}   // '';
     my $stage    = $job->{stage}    // '';
     my $step_idx = $job->{step_idx} // 0;
@@ -539,7 +550,6 @@ sub pump_tick {
     if ( $is_terminal ) {
       delete $job->{next_ts};
 
-      # log terminal only once, but keep the unified line above every tick
       next if $job->{terminal_logged};
       $job->{terminal_logged} = 1;
 
@@ -569,7 +579,8 @@ sub pump_tick {
       my $remain = @$steps - $step_idx;
       $remain = 0 if $remain < 0;
 
-      my @ops = map { ( ref( $_ ) eq 'HASH' ) ? ( $_->{op} // "?" ) : "?" }
+      my @ops =
+          map { ( ref( $_ ) eq 'HASH' ) ? ( $_->{op} // "?" ) : "?" }
           @$steps[ $step_idx .. $#$steps ];
 
       my $ops;
@@ -628,7 +639,6 @@ sub pump_tick {
     }
 
     if ( $result eq 'interactive' ) {
-
       if ( $bridged ) {
         _bless_paths( $app, $qbt, $job, $tick_cache );
         _qbt_remove_torrent( $app, $qbt, $ih, delete_files => 0 );
@@ -641,7 +651,6 @@ sub pump_tick {
     }
 
     if ( $result eq 'renamed_root' ) {
-
       if ( $bridged ) {
         _bless_paths( $app, $qbt, $job, $tick_cache );
         _qbt_remove_torrent( $app, $qbt, $ih, delete_files => 0 );
@@ -761,7 +770,7 @@ sub _job_mark_needs_user {
 
   $app->log->debug(   basename( __FILE__ ) . ":"
                     . __LINE__
-                    . "  needs_user ih: "
+                    . " needs_user ih: "
                     . short_ih( $ih )
                     . " reason: $reason stage: $g->{$ih}{stage} why: $why " );
 
@@ -1039,7 +1048,7 @@ sub _job_retry_step {
   $app->log->debug(   basename( __FILE__ ) . ":"
                     . __LINE__
                     . "  retry ih: "
-                    . ( $job->{ih} // '' )
+                    . short_ih( $job->{ih} // '' )
                     . " op: $op tries: $step->{tries} next_in: ${delay} s why: "
                     . ( $why // '' ) );
 
@@ -1213,22 +1222,23 @@ sub _qbt_prefs_cached {
 # ------------------------------
 
 sub _inject_parachute {
-  my ( $job, %args ) = @_;
-  my $reason = $args{reason} // 'unknown';
+  my ( $job, %opt ) = @_;
+  my $reason = $opt{reason} // 'unknown';
 
-  my $steps = ( ref( $job->{steps} ) eq 'ARRAY' ) ? $job->{steps} : [];
-  my $i     = $job->{step_idx} // 0;
+  return 0 unless ref( $job ) eq 'HASH';
+  return 0 if $job->{parachute_injected};
 
-  # keep prefix through current step (so logs/stage remain coherent)
-  my @prefix = ();
-  @prefix = @$steps[ 0 .. $i ] if @$steps && $i >= 0 && $i < @$steps;
+  $job->{parachute_injected} = 1;
+  $job->{parachute_reason}   = $reason;
 
-  $job->{steps} =
-      [ @prefix, {op => 'parachute', tries => 0, reason => $reason}, ];
+  $job->{plan} ||= {};
+  $job->{plan}{ops}    = [ {op => 'parachute', tries => 0} ];
+  $job->{plan}{op_idx} = 0;
 
-  $job->{parachute_reason} = $reason;
-  $job->{plan_needed}      = 0;         # plan is now explicit
-  return;
+  # run ASAP
+  $job->{next_ts} = time;
+
+  return 1;
 }
 
 sub _run_step {
