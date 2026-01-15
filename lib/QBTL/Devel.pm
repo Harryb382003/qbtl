@@ -5,6 +5,7 @@ use common::sense;
 use Mojo::IOLoop;
 use Mojo::JSON qw(true);
 use Data::Dumper;
+use QBTL::Utils    qw(prefix_dbg);
 
 # use lib 'lib';
 # use QBTL::LocalCache;
@@ -334,7 +335,7 @@ sub register_routes {
       my $app = $c->app;
 
       # show we really restarted
-      $app->log->debug( __LINE__ . "[Devel] /restart requested pid=$$" );
+      $app->log->debug( prefix_dbg() . "  /restart requested pid=$$" );
 
 # --- NUKE ALL RUNTIME STATE (must use $c->app / $app, not a stray $app var) ---
       delete $app->defaults->{jobs};       # Queue.pm jobs
@@ -353,7 +354,7 @@ sub register_routes {
       # Give the browser time to receive the response, then exit.
       Mojo::IOLoop->timer(
         0.15 => sub {
-          $app->log->debug( __LINE__ . "[Devel] restart -> exiting 42 pid=$$" );
+          $app->log->debug( prefix_dbg() . "  restart -> exiting 42 pid=$$" );
           CORE::exit( 42 );
         } );
 

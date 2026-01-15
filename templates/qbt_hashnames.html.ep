@@ -10,6 +10,9 @@
 % # ---------------------------
 % my $show_progress = 0;
 % my $show_state    = 0;
+% my $page   = stash('page')  // 1;
+% my $pages  = stash('pages') // 1;
+
 % for my $t (@$sample) {
 %   my $p  = defined $t->{progress} ? $t->{progress} : -1;
 %   my $st = $t->{state} // '';
@@ -114,7 +117,7 @@
 
         <td>
           % if (stash('dev_mode')) {
-            <form method="post" action="/qbt/refresh_hashname" style="margin:0;">
+            <form method="post" action="/qbt/refresh_hashnames" style="margin:0;">
               <input type="hidden" name="hash" value="<%= $t->{hash} %>">
               <button type="submit">Refresh</button>
             </form>

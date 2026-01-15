@@ -25,6 +25,7 @@ our @EXPORT_OK = qw(
     start_timer
     stop_timer
     epoch2time
+    prefix_dbg
 );
 
 #                     dump_hash_to_disk
@@ -244,6 +245,11 @@ sub epoch2str {
   my ( $epoch ) = @_;
   return '' unless defined $epoch && $epoch =~ /^\d+$/;
   return POSIX::strftime( '%Y-%m-%d %H:%M:%S', localtime( $epoch ) );
+}
+
+sub prefix_dbg {
+  my ( $fn, $line ) = ( caller() )[ 1, 2 ];
+  return ( basename( $fn ) . ":" . $line );
 }
 
 #

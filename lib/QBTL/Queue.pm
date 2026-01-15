@@ -9,7 +9,9 @@ use QBTL::QBT;
 use QBTL::SavePath qw( derive_savepath_from_payload );
 use QBTL::Utils    qw(
     short_ih
-    epoch2time );
+    epoch2time
+    prefix_dbg
+);
 
 use File::Basename qw( dirname basename);
 
@@ -45,22 +47,19 @@ sub start {
 
   my $idref = _tick_id_ref( $app );
   return if $$idref;
-  $app->log->debug(   basename( __FILE__ ) . ":"
-                    . __LINE__
-                    . " start called tick_seconds: $tick_seconds" );
+  $app->log->debug(
+                   prefix_dbg() . " start called tick_seconds: $tick_seconds" );
   my $id = Mojo::IOLoop->recurring(
     $tick_seconds => sub {
       eval { $class->pump_tick( $app, opts => $opts ); 1 } or do {
         my $err = "$@";
         chomp $err;
-        $app->log->error(
-              basename( __FILE__ ) . ":" . __LINE__ . " pump_tick died: $err" );
+        $app->log->error( prefix_dbg() . " pump_tick died: $err" );
       };
     } );
 
   $$idref = $id;
-  $app->log->debug(
-               basename( __FILE__ ) . ":" . __LINE__ . " start: tick id: $id" );
+  $app->log->debug( prefix_dbg() . " start: tick id: $id" );
   return $id;
 }
 
@@ -70,8 +69,7 @@ sub stop {
   return unless $$idref;
 
   Mojo::IOLoop->remove( $$idref );
-  $app->log->debug(
-            basename( __FILE__ ) . ":" . __LINE__ . " stop: tick id: $$idref" );
+  $app->log->debug( prefix_dbg() . " stop: tick id: $$idref" );
   $$idref = undef;
   return 1;
 }
@@ -142,13 +140,11 @@ sub _bless_paths {
   # CANONICAL LATCH
   $job->{paths_blessed} = 1;
 
-  $app->log->debug( basename( __FILE__ ) . ":"
-         . __LINE__
-         . " bless_paths ih="
+  $app->log->debug( prefix_dbg()
+         . "  bless_paths ih="
          . short_ih( $ih )
          . " state=$state save=[$save_path] dl=[$download_path] root=[$root]" );
-  $app->log->debug(
-             basename( __FILE__ ) . ":" . __LINE__ . " PATHS ARE NOW BLESSED" );
+  $app->log->debug( prefix_dbg() . "  PATHS ARE NOW BLESSED" );
 
   return 1;
 }
@@ -221,10 +217,8 @@ sub _jobs_summary {
 sub enqueue_add_one {
   my ( $class, $app, $ih, %args ) = @_;
   die "bad ih" unless defined( $ih ) && $ih =~ /^[0-9a-f]{40}$/;
-  $app->log->debug(   basename( __FILE__ ) . ":"
-                    . __LINE__
-                    . " Entered enqueue_add_one ih: "
-                    . short_ih( $ih ) );
+  $app->log->debug(
+             prefix_dbg() . " Entered enqueue_add_one ih: " . short_ih( $ih ) );
   my $jobs = _jobs_ref( $app );
   my $now  = time;
 
@@ -297,8 +291,7 @@ sub enqueue_add_one {
     $rename_dbg = "$from->$to ";
   }
 
-  $app->log->debug(   basename( __FILE__ ) . ":"
-                    . __LINE__
+  $app->log->debug(   prefix_dbg()
                     . "  enqueue_add_one ih = "
                     . short_ih( $ih )
                     . " rename = $rename_dbg " );
@@ -365,7 +358,8 @@ sub _bridged_now {
 # ------------------------------
 sub pump_tick {
   my ( $class, $app, %args ) = @_;
-
+  state $TICK_N = 0;
+  $TICK_N++;
   my $opts = $args{opts} || {};
   my $jobs = _jobs_ref( $app );
   my $sum  = _jobs_summary( $jobs );
@@ -396,15 +390,12 @@ sub pump_tick {
   unless ( $prefs_ok ) {
     my $e = "$@";
     chomp $e;
-    $app->log->error(
-         basename( __FILE__ ) . ":" . __LINE__ . " prefs snapshot failed: $e" );
+    $app->log->error( prefix_dbg() . " prefs snapshot failed: $e" );
     $temp_enabled = undef;
   }
 
   $tick_cache->{prefs} ||= {};
   $tick_cache->{prefs}{temp_path_enabled} = $temp_enabled;
-
-  my $tick_prefix = basename( __FILE__ ) . ":" . __LINE__ . " pump_tick: $sum";
 
   for my $ih ( sort keys %$jobs ) {
     my $job = $jobs->{$ih};
@@ -454,8 +445,7 @@ sub pump_tick {
 
         $job->{next_ts} = $now;
 
-        $app->log->debug(   basename( __FILE__ ) . ":"
-                          . __LINE__
+        $app->log->debug(   prefix_dbg()
                           . "\n######################################"
                           . "\n\tPARACHUTE_NEEDED ih="
                           . short_ih( $ih ) . "\n\t"
@@ -475,9 +465,8 @@ sub pump_tick {
       $job->{stage}       = 'queued';
       $job->{plan_needed} = 0;
 
-      $app->log->debug(   basename( __FILE__ ) . ":"
-                        . __LINE__
-                        . " planned ih: "
+      $app->log->debug(   prefix_dbg()
+                        . "  planned ih: "
                         . short_ih( $ih )
                         . " bridged="
                         . ( defined( $bridged ) ? $bridged : '(undef)' )
@@ -515,8 +504,7 @@ sub pump_tick {
           delete $job->{parachute_reason};
           $job->{plan_needed} = 1;
 
-          $app->log->debug(   basename( __FILE__ ) . ":"
-                            . __LINE__
+          $app->log->debug(   prefix_dbg()
                             . " reinit needs_user ih: "
                             . short_ih( $ih )
                             . " reason=$reason (temp_path_enabled=0)" );
@@ -535,16 +523,15 @@ sub pump_tick {
     my $wait = $next_ts - $now;
 
     # Unified per-job-per-tick line: BR + pump_tick + JOB
-    $app->log->debug(  basename( __FILE__ ) . ":"
-                     . __LINE__ . " BR:"
-                     . ( $job->{bridged} ? 1 : 0 ) . " "
-                     . $tick_prefix
-                     . " [JOB] ih="
-                     . short_ih( $ih )
-                     . " status=$status stage=$stage step_idx=$step_idx" . " F="
-                     . epoch2time( $next_ts )
-                     . " wait="
-                     . sprintf( "%+ds", $wait ) );
+    $app->log->debug( prefix_dbg() . "  BR:"
+                . ( $job->{bridged} ? 1 : 0 )
+                . " pump_tick : $sum "
+                . " [JOB] ih:"
+                . short_ih( $ih )
+                . " status: $status stage: $stage step_idx: $step_idx " . " F: "
+                . epoch2time( $next_ts )
+                . " wait: "
+                . sprintf( "% +ds", $wait ) );
 
     my $is_terminal = ( $status =~ /^(done|failed|needs_user|needs_triage)$/ );
     if ( $is_terminal ) {
@@ -553,11 +540,12 @@ sub pump_tick {
       next if $job->{terminal_logged};
       $job->{terminal_logged} = 1;
 
-      $app->log->debug( basename( __FILE__ ) . ":"
-               . __LINE__
-               . " [JOB] ih="
-               . short_ih( $ih )
-               . " status=$status stage=$stage step_idx=$step_idx (terminal)" );
+      $app->log->debug(
+              prefix_dbg()
+            . " [JOB] ih: "
+            . short_ih( $ih )
+            . " status = $status stage = $stage step_idx =
+          $step_idx ( terminal ) " );
       next;
     }
 
@@ -580,8 +568,14 @@ sub pump_tick {
       $remain = 0 if $remain < 0;
 
       my @ops =
-          map { ( ref( $_ ) eq 'HASH' ) ? ( $_->{op} // "?" ) : "?" }
-          @$steps[ $step_idx .. $#$steps ];
+          map {
+        ( ref( $_ ) eq 'HASH' )
+            ? (
+          $_->{op} // "
+      ? " )
+            : "
+            ? "
+          } @$steps[ $step_idx .. $#$steps ];
 
       my $ops;
       if ( @ops <= 4 ) {
@@ -591,17 +585,16 @@ sub pump_tick {
         $ops = join( ", ", @ops[ 0 .. 2 ] ) . ", ..., " . $ops[-1];
       }
 
-      $app->log->debug(   basename( __FILE__ ) . ":"
-                        . __LINE__
-                        . " [PLAN] ih: "
+      $app->log->debug(   prefix_dbg()
+                        . "  [PLAN] ih: "
                         . short_ih( $ih )
-                        . " steps_remaining=$remain ops=[$ops]" );
+                        . " steps_remaining = $remain ops = [$ops] " );
     }
 
     my $step = $steps->[$step_idx];
     if ( ref( $step ) ne 'HASH' ) {
       _job_mark_failed( $app, $job, $now,
-                        "bad step at idx=$step_idx (not a HASH)" );
+                        " bad step at idx = $step_idx ( not a HASH ) " );
       next;
     }
 
@@ -613,11 +606,10 @@ sub pump_tick {
     my ( $result, $why, $hint ) =
         _run_step( $app, $qbt, $job, $step, $tick_cache );
 
-    $app->log->debug(   basename( __FILE__ ) . ":"
-                      . __LINE__
-                      . " step ih: "
+    $app->log->debug(   prefix_dbg()
+                      . "  step ih : "
                       . short_ih( $ih )
-                      . " op=$op result=$result why="
+                      . " op = $op result = $result why = "
                       . ( $why // '' ) );
 
     if ( $result eq 'advance' ) {
@@ -668,15 +660,18 @@ sub pump_tick {
                               $job,
                               $now,
                               'unexpected_result',
-                              ( $why || "failed (result=$result)" ),
-                              "op="
+                              ( $why || " failed( result = $result ) " ),
+                              " op = "
                                   . ( $job->{stage} // '' )
-                                  . " step_idx="
+                                  . " step_idx = "
                                   . ( $job->{step_idx} // 0 ) );
       next;
     }
 
-    _job_mark_failed( $app, $job, $now, $why || "failed (result=$result)" );
+    _job_mark_failed(
+      $app, $job, $now, $why
+          || " failed( result = $result )
+          " );
   }
 
   return;
@@ -768,11 +763,12 @@ sub _job_mark_needs_user {
                stage    => ( $job->{stage}    // '' ),
                step_idx => ( $job->{step_idx} // 0 ),};
 
-  $app->log->debug(   basename( __FILE__ ) . ":"
-                    . __LINE__
-                    . " needs_user ih: "
-                    . short_ih( $ih )
-                    . " reason: $reason stage: $g->{$ih}{stage} why: $why " );
+  $app->log->debug(
+          prefix_dbg()
+        . " needs_user ih : "
+        . short_ih( $ih )
+        . " reason : $reason stage : $g->{$ih}{stage} why : $why
+          " );
 
   return 1;
 }
@@ -807,11 +803,13 @@ sub _job_mark_needs_triage {
                stage    => ( $job->{stage}    // '' ),
                step_idx => ( $job->{step_idx} // 0 ),};
 
-  $app->log->error(   ":"
-                    . __LINE__
-                    . "  needs_triage ih: "
-                    . short_ih( $ih )
-                    . " reason: $reason stage: $t->{$ih}{stage} why: $why " );
+  $app->log->error(
+          " : "
+        . __LINE__
+        . " needs_triage ih : "
+        . short_ih( $ih )
+        . " reason : $reason stage : $t->{$ih}{stage} why : $why
+          " );
 
   return 1;
 }
@@ -837,11 +835,10 @@ sub _job_mark_renamed_root {
                stage    => ( $job->{stage}    // '' ),
                step_idx => ( $job->{step_idx} // 0 ),};
 
-  $app->log->debug(   basename( __FILE__ ) . ":"
-                    . __LINE__
-                    . "  renamed_root ih: "
+  $app->log->debug(   prefix_dbg()
+                    . " renamed_root ih : "
                     . short_ih( $ih )
-                    . " reason: $r->{$ih}{reason} " );
+                    . " reason : $r->{$ih}{reason} " );
   return 1;
 }
 
@@ -855,14 +852,12 @@ sub _cleanup_symlink_if_any {
   return 0 unless length $link;
   if ( -l $link ) {
     my $ok = unlink $link;
-    $app->log->debug(   basename( __FILE__ ) . ":"
-                      . __LINE__
-                      . "  symlink cleanup link: $link ok: $ok " );
+    $app->log->debug( prefix_dbg() . "  cleanup symlink : $link ok : $ok " );
   }
   else {
-    $app->log->debug( basename( __FILE__ ) . ":"
-           . __LINE__
-           . " [queue] symlink cleanup skipped( not a symlink ) link: $link " );
+    $app->log->debug(
+      prefix_dbg() . " symlink cleanup skipped( not a symlink ) link : $link
+          " );
   }
 
   delete $job->{symlink_path};
@@ -884,11 +879,10 @@ sub _ensure_symlink_for_recheck {
   }
   else {
     my ( $pkg, $file, $line, $sub ) = caller( 1 );    # 1 = immediate caller
-    $app->log->debug( "#######################################################"
+    $app->log->debug( " #######################################################"
            . "\nlegacy fallback caller: sub=$sub file=$file line=$line pkg=$pkg"
     );
-    $app->log->debug( basename( __FILE__ ) . ":"
-             . __LINE__
+    $app->log->debug( prefix_dbg()
              . "\n##########################################################"
              . "\nlegacy fallback was used but should be unnecessary."
              . "\nnot all callers are latching properly and should be fixed!"
@@ -960,9 +954,7 @@ sub _ensure_symlink_for_recheck {
       $job->{symlink_target} = $target;
       $job->{symlink_used}   = 1;
       $app->log->debug(
-              basename( __FILE__ ) . ":"
-            . __LINE__
-            . "  symlink replaced link =
+        prefix_dbg() . "  symlink replaced link =
         $link->$target " );
       return ( 1, " symlink replaced " );
     }
@@ -982,9 +974,8 @@ sub _ensure_symlink_for_recheck {
     $job->{symlink_path}   = $link;
     $job->{symlink_target} = $target;
     $job->{symlink_used}   = 1;
-    $app->log->debug(   basename( __FILE__ ) . ":"
-                      . __LINE__
-                      . "  symlink created link: $link->$target " );
+    $app->log->debug(
+                     prefix_dbg() . "  symlink created link: $link->$target " );
     return ( 1, " symlink created " );
   }
 
@@ -1005,8 +996,7 @@ sub _job_retry_step {
   if ( $op eq 'probe_checking' && $step->{probe_after_ts} ) {
     my $ts = $step->{probe_after_ts};
     $job->{next_ts} = $ts if $ts > $now;
-    $app->log->debug(   basename( __FILE__ ) . ":"
-                      . __LINE__
+    $app->log->debug(   prefix_dbg()
                       . "  probe_checking sleep_until: "
                       . epoch2time( $job->{next_ts} ) );
     return 1;
@@ -1045,9 +1035,8 @@ sub _job_retry_step {
   my $delay = $arr->[ $step->{tries} - 1 ];
   $job->{next_ts} = $now + $delay;
 
-  $app->log->debug(   basename( __FILE__ ) . ":"
-                    . __LINE__
-                    . "  retry ih: "
+  $app->log->debug(   prefix_dbg()
+                    . " retry ih: "
                     . short_ih( $job->{ih} // '' )
                     . " op: $op tries: $step->{tries} next_in: ${delay} s why: "
                     . ( $why // '' ) );
@@ -1179,17 +1168,13 @@ sub _qbt_remove_torrent {
   if ( $@ ) {
     my $e = "$@";
     chomp $e;
-    $app->log->debug(   basename( __FILE__ ) . ":"
-                      . __LINE__
-                      . " qbt delete threw ih: "
-                      . short_ih( $ih )
-                      . " err=$e" );
+    $app->log->debug(
+        prefix_dbg() . " qbt delete threw ih: " . short_ih( $ih ) . " err=$e" );
     return ( 0, $e );
   }
 
   if ( ref( $res ) eq 'HASH' && $res->{ok} ) {
-    $app->log->debug(   basename( __FILE__ ) . ":"
-                      . __LINE__
+    $app->log->debug(   prefix_dbg()
                       . "  qbt delete ok ih: "
                       . short_ih( $ih )
                       . " delete_files: $delete_files" );
@@ -1198,9 +1183,7 @@ sub _qbt_remove_torrent {
 
   my $code = ( ref( $res ) eq 'HASH' ) ? ( $res->{code} // 0 )  : 0;
   my $body = ( ref( $res ) eq 'HASH' ) ? ( $res->{body} // '' ) : '';
-  $app->log->debug(   ":"
-                    . basename( __FILE__ ) . ":"
-                    . __LINE__
+  $app->log->debug(   prefix_dbg()
                     . "  qbt delete not ok ih: "
                     . short_ih( $ih )
                     . " http: $code body: [$body]" );
@@ -1251,16 +1234,63 @@ sub _run_step {
       unless $ih =~ /^[0-9a-f]{40}$/;
 
   if ( $op eq 'parachute' ) {
-    $app->log->debug(   basename( __FILE__ ) . ":"
-                      . __LINE__
-                      . "\n##########################################"
-                      . "\n\tPARACHUTE DEPLOYED"
-                      . "\n##########################################" );
+
+    #     $app->log->debug(   basename( __FILE__ ) . ":"
+    #                       . __LINE__
+    #                       . "\n##########################################"
+    #                       . "\n\tPARACHUTE DEPLOYED"
+    #                       . "\n##########################################" );
 
     # If it’s visible, bless once (authoritative snapshot) using the same t0
     my $t0 = _qbt_torrents_info_one_cached( $qbt, $tick_cache, $ih );
     if ( ref( $t0 ) eq 'HASH' ) {
       _bless_paths( $app, $qbt, $job, $tick_cache, t0 => $t0 );
+    }
+
+    # inside _run_step
+    if ( $op eq 'parachute' ) {
+      $app->log->debug(   prefix_dbg()
+                        . "\n##########################################"
+                        . "\n\tPARACHUTE DEPLOYED"
+                        . "\n##########################################"
+                        . "\n\tih="
+                        . short_ih( $ih ) . " "
+                        . ( $job->{parachute_reason} // '' ) );
+
+      # Bless if visible (non-destructive snapshot)
+      my $t0 = _qbt_torrents_info_one_cached( $qbt, $tick_cache, $ih );
+      if ( ref( $t0 ) eq 'HASH' ) {
+        _bless_paths( $app, $qbt, $job, $tick_cache );
+      }
+
+      # After parachute, we must NOT "advance -> done".
+      # We re-base the job and force a re-plan for next tick.
+
+      # clear run-state that would prevent a clean re-run
+      delete $job->{recheck_requested_ts};
+      delete $job->{recheck_last_check0};
+      delete $job->{stability_probe_inserted};
+      delete $job->{symlink_used};
+      delete $job->{symlink_path};
+      delete $job->{symlink_target};
+
+      # allow future parachutes (if it flips again later)
+      delete $job->{parachute_injected};
+      delete $job->{parachute_reason};
+
+      # IMPORTANT: re-arm plan baseline at new reality
+      delete $job->{plan_br};
+      delete $job->{plan_tpe};
+
+      # force rebuild steps
+      $job->{plan_needed} = 1;
+      $job->{steps}       = [];
+      $job->{step_idx}    = 0;
+      $job->{stage}       = 'queued';
+      $job->{status}      = 'queued';
+      $job->{next_ts}     = time;
+
+      return ( 'retry', 'parachute: rebased + replanning next tick' );
     }
 
     my $bridged = $job->{bridged}       ? 1 : 0;    # LATCHED at plan-build time
@@ -1429,8 +1459,7 @@ sub _run_step {
     my $t0 = _qbt_torrents_info_one_cached( $qbt, $tick_cache, $ih );
     return ( 'retry', "recheck: not visible yet" ) unless ref( $t0 ) eq 'HASH';
 
-    $app->log->debug(   basename( __FILE__ ) . ":"
-                      . __LINE__
+    $app->log->debug(   prefix_dbg()
                       . " $op ih: "
                       . short_ih( $ih )
                       . " state: "
@@ -1494,8 +1523,7 @@ sub _run_step {
       my $link   = "$download_path/$root";
 
       if ( $target eq $link ) {
-        $app->log->debug( basename( __FILE__ ) . ":"
-                      . __LINE__
+        $app->log->debug( prefix_dbg()
                       . " recheck: symlink skipped (target==link) path=$link" );
       }
       else {
@@ -1509,9 +1537,7 @@ sub _run_step {
           return ( 'retry', "recheck: symlink prep failed: $why" );
         }
 
-        $app->log->debug(   basename( __FILE__ ) . ":"
-                          . __LINE__
-                          . " recheck: symlink prep ok: $why " );
+        $app->log->debug( prefix_dbg() . " recheck: symlink prep ok: $why " );
 
 #                 . " recheck: symlink prep ok: $why link=$link target=$target" );
       }
@@ -1530,8 +1556,7 @@ sub _run_step {
 
     my $t1 = _qbt_torrents_info_one_cached( $qbt, $tick_cache, $ih );
     if ( ref( $t1 ) eq 'HASH' ) {
-      $app->log->debug(   basename( __FILE__ ) . ":"
-                        . __LINE__
+      $app->log->debug(   prefix_dbg()
                         . " post-recheck ih: "
                         . short_ih( $ih )
                         . " state: "
@@ -1720,7 +1745,7 @@ sub _run_step {
 #   state $inflight = 0;
 #   if ( $inflight ) {
 #     $app->log->debug(
-#         basename( __FILE__ ) . ":" . __LINE__ . " pump_tick: skip (inflight)" );
+#          prefix_dbg() . " pump_tick: skip (inflight)" );
 #     return;
 #   }
 #   $inflight = 1;
@@ -1732,7 +1757,7 @@ sub _run_step {
 #   unless ( $ok ) {
 #     chomp $err;
 #     $app->log->error(
-#              basename( __FILE__ ) . ":" . __LINE__ . " pump_tick died: $err " );
+#               prefix_dbg() . " pump_tick died: $err " );
 #   }
 #
 #   return;
@@ -1745,7 +1770,7 @@ sub _run_step {
 #
 #   my $sum = _jobs_summary( $jobs );
 #   $app->log->debug(
-#                   basename( __FILE__ ) . ":" . __LINE__ . " pump_tick: $sum " );
+#                    prefix_dbg() . " pump_tick: $sum " );
 #   return unless %$jobs;
 #
 #   my $qbt;
@@ -1754,7 +1779,7 @@ sub _run_step {
 #     my $err = "$@ ";
 #     chomp $err;
 #     $app->log->error(
-#             basename( __FILE__ ) . ":" . __LINE__ . " QBT init failed: $err " );
+#              prefix_dbg() . " QBT init failed: $err " );
 #     return;
 #   }
 #

@@ -19,6 +19,7 @@ use QBTL::Utils qw(
     start_timer
     stop_timer
     short_ih
+    prefix_dbg
 );
 use QBTL::Logger;
 
@@ -246,7 +247,16 @@ sub app {
   # Keep cache stamp fresh (prefer .stor else .json)
   $app->hook(
     before_dispatch => sub {
-      my $c    = shift;
+      my $c = shift;
+
+      # --- PROVE REQUESTS ARE HITTING MOJO ---
+      my $m = $c->req->method                // '';
+      my $p = $c->req->url->path->to_string  // '';
+      my $q = $c->req->url->query->to_string // '';
+      $c->app->log->debug(   basename( __FILE__ ) . ":"
+                           . __LINE__
+                           . " REQ $m $p"
+                           . ( length( $q ) ? "?$q" : "" ) );
       my $root = $c->app->defaults->{root_dir} || '.';
 
       my $bin  = QBTL::LocalCache::cache_path_bin( root_dir => $root );
@@ -442,7 +452,8 @@ sub app {
   $r->get(
     '/qbt/add_one' => sub {
       my $c = shift;
-      $c->app->log->debug(   "add_one ctx method="
+      $c->app->log->debug(   prefix_dbg()
+                           . "  add_one ctx method="
                            . $c->req->method
                            . " path="
                            . $c->req->url->path . " ref="
@@ -451,10 +462,12 @@ sub app {
                            . ( $c->param( 'return_to' ) // '(none)' )
                            . " hash="
                            . ( $c->param( 'hash' ) // '(none)' ) );
-      $c->app->log->debug( "add_one GET return_to_in="
+      $c->app->log->debug(   prefix_dbg()
+                           . "  add_one GET return_to_in="
                            . ( $c->param( 'return_to' ) // '(none)' ) );
 
-      $c->app->log->debug( "add_one GET return_to_ok: "
+      $c->app->log->debug(   prefix_dbg()
+                           . "  add_one GET return_to_ok: "
                            . ( $c->stash( 'return_to' ) // '(none)' ) );
       $c->stash( dev_mode => ( $opts->{dev_mode} ? 1 : 0 ) );
 
@@ -476,9 +489,7 @@ sub app {
       {
         _add_one_advance( $c->app );
 
-        $c->app->log->debug(   basename( __FILE__ ) . ":"
-                             . __LINE__
-                             . " queued return_to=$return_to" );
+        $c->app->log->debug( prefix_dbg() . " queued return_to=$return_to" );
         return $c->redirect_to( $return_to );
       }
 
@@ -990,20 +1001,22 @@ queue_n: "
 
     } );
 
-  $r->post(
-    '/qbt/refresh_hashname' => sub {
-      my $c = shift;
-
-      my $qbt = QBTL::QBT->new( {} );
-
-    # simplest: just bounce back to list; list route will re-snapshot qbt anyway
-      return $c->redirect_to( '/qbt/hashnames' );
-    } );
+#   $r->post(
+#     '/qbt/refresh_hashname' => sub {
+#       my $c = shift;
+#
+#       my $qbt = QBTL::QBT->new( {} );
+#
+#     # simplest: just bounce back to list; list route will re-snapshot qbt anyway
+#       return $c->redirect_to( '/qbt/hashnames' );
+#     } );
 
   $r->get(
     '/qbt/hashnames' => sub {
       my $c = shift;
 
+      $c->app->log->debug( prefix_dbg() . " ENTER /qbt/hashnames" );
+      my $t0  = time;
       my $qbt = QBTL::QBT->new( {} );
 
       # pull fresh every time (for now)
@@ -1034,16 +1047,21 @@ queue_n: "
                  sample => \@rows,
                  per    => scalar( @rows ), );
 
+      $c->app->log->debug(
+             prefix_dbg() . " EXIT /qbt/hashnames dt=" . ( time - $t0 ) . "s" );
       return $c->render( template => 'qbt_hashnames' );
     } );
 
   $r->post(
     '/qbt/refresh_hashnames' => sub {
-      my $c = shift;
+      my $c  = shift;
+      my $t0 = time;
+      $c->app->log->debug( prefix_dbg() . " ENTER /qbt/hashnames" );
 
       # simplest “refresh” behavior: just invalidate snapshot + bounce back
       $c->app->defaults->{qbt_snap_ts} = 0;
-
+      $c->app->log->debug(
+             prefix_dbg() . " EXIT /qbt/hashnames dt=" . ( time - $t0 ) . "s" );
       return $c->redirect_to( '/qbt/hashnames' );
     } );
 
@@ -1230,6 +1248,10 @@ queue_n: "
 
   return $app;
 }
+
+1;
+
+=pod
 
 # sub _add_one_current {
 #   my ( $app ) = @_;
@@ -1559,3 +1581,6 @@ queue_n: "
 #}
 
 1;
+
+
+=cut
