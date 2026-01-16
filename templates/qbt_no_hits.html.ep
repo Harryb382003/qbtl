@@ -1,0 +1,30 @@
+% layout 'main';
+% title 'No Hits';
+
+<h2>No Hits (<%= $found %>)</h2>
+
+% if (!$found) {
+  <p>No torrents currently classified as NO_HITS.</p>
+% } else {
+  <table>
+    <tr>
+      <th>Infohash</th>
+      <th>Reason</th>
+      <th>When</th>
+    </tr>
+
+    % for my $r (@$rows) {
+      <tr>
+        <td><%= $r->{ih} %></td>
+        <td><%= $r->{why} %></td>
+        <td>
+          <%= $r->{ts}
+                ? scalar localtime($r->{ts})
+                : '' %>
+        </td>
+      </tr>
+    % }
+  </table>
+% }
+
+

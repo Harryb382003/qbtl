@@ -9,11 +9,13 @@ use Mojolicious;
 use Mojo::JSON qw(true);
 
 use QBTL::LocalCache;
+use QBTL::Logger;
 use QBTL::QBT;
-use QBTL::Queue;
+use QBTL::Queue    qw ( classify_no_hits );
 use QBTL::SavePath qw(
     munge_savepath_and_root_rename
     torrent_top_lvl_from_rec
+    derive_savepath_from_payload
 );
 use QBTL::Utils qw(
     start_timer
@@ -21,7 +23,6 @@ use QBTL::Utils qw(
     short_ih
     prefix_dbg
 );
-use QBTL::Logger;
 
 QBTL::Logger::enable_disk_logging( path => 'qbtl.log', level => 'debug' );
 
@@ -600,15 +601,16 @@ sub app {
 
       my $source_path = $c->param( 'source_path' ) // '';
 
-      return
-          $c->render(
-                      template => 'qbt_add_one',
-                      error    => "bad hash",
-                      picked   => {
-                                 hash        => $hash,
-                                 source_path => $source_path
-                      },
-          ) unless $hash =~ /^[0-9a-f]{40}$/;
+      unless ( $hash =~ /^[0-9a-f]{40}$/ ) {
+        return
+            $c->render(
+                        template => 'qbt_add_one',
+                        error    => "bad hash",
+                        picked   => {
+                                   hash        => $hash,
+                                   source_path => $source_path
+                        } );
+      }
 
       my $confirm = $c->param( 'confirm' ) // '';
       my $retry   = $c->param( 'retry' )   // 0;    # hook only (unused for now)
@@ -665,12 +667,11 @@ sub app {
 
         _add_one_remove_hash( $c->app, $hash );
         my $st = _add_one_state( $c->app );
-        $app->log->debug(
-                basename( __FILE__ ) . ":"
-              . __LINE__
-              . " [add_one] after remove ih: $hash idx: $st->{idx}
-queue_n: "
-              . scalar( @{$st->{queue} || []} ) );
+        $app->log->debug(   basename( __FILE__ ) . ":"
+                          . __LINE__
+                          . " [add_one] after remove ih: "
+                          . "$hash idx: $st->{idx} queue_n: "
+                          . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -721,11 +722,11 @@ queue_n: "
 
       $app->log->debug(   basename( __FILE__ ) . ":"
                         . __LINE__
-                        . "  PREFLIGHT: size:$sz pick_hash: "
+                        . " PREFLIGHT: \n\tsize:$sz pick_hash: "
                         . short_ih( $hash )
                         . " file_ih: "
                         . short_ih( $ih_file )
-                        . " path: $source_path" );
+                        . "\n\tpath: $source_path" );
 
       require QBTL::SavePath;
 
@@ -736,8 +737,7 @@ queue_n: "
       $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
 
       my ( $savepath, $why, $add );
-      my $pending_root_rename_data
-          ;    # <-- MUST be outside eval so we can pass to Queue
+      my $pending_root_rename_data;
 
       my $ok = eval {
         my $rec = $local_by_ih->{$hash};
@@ -745,11 +745,36 @@ queue_n: "
 
         my @sp_dbg;
         ( $savepath, $why ) =
-            QBTL::SavePath::derive_savepath_from_payload( rec   => $rec,
+            QBTL::SavePath::derive_savepath_from_payload(
+                                                          $app, $ih_file,
+                                                          rec   => $rec,
                                                           debug => \@sp_dbg, );
+        unless ( $savepath ) {
 
-        die "savepath not found ($why)\n\n" . _fmt_savepath_debug( \@sp_dbg )
-            unless $savepath;
+          # minimal record for NO_HITS (stash whatever you have)
+          my $nohit = {
+            ih          => $hash,    # <-- use the infohash key you’re in
+            name        => ( $rec->{name}        // '' ),
+            bucket      => ( $rec->{bucket}      // '' ),
+            tracker     => ( $rec->{tracker}     // '' ),
+            source_path => ( $rec->{source_path} // '' ),
+            total_size  => ( $rec->{total_size}  // 0 ),
+            files => ( ref( $rec->{files} ) eq 'ARRAY' ? $rec->{files} : [] ),
+
+            # optional but useful for “why did it fail”
+            savepath_why => ( $why // '' ),
+            savepath_dbg => \@sp_dbg,         # keep it if you want
+          };
+
+          classify_no_hits( $app, $nohit, "savepath_not_found" );
+
+          # signal to caller that we “handled” this ih as NO_HITS
+          $add = 0;                           # if you use $add later
+          return ( 0, "no_hit" );
+        }
+
+ #         die "savepath not found ($why)\n\n" . _fmt_savepath_debug( \@sp_dbg )
+ #             unless $savepath;
 
         # ---- Munge savepath + decide root rename (if hit path is known) ----
         my $hit_path = '';
@@ -793,19 +818,11 @@ queue_n: "
 
           $app->log->debug(   basename( __FILE__ ) . ":"
                             . __LINE__
-                            . " dbg disk_file_dir=$disk_file_dir_dbg" );
-          $app->log->debug(   basename( __FILE__ ) . ":"
-                            . __LINE__
-                            . " dbg disk_parent_dir=$disk_parent_dir_dbg" );
-          $app->log->debug(   basename( __FILE__ ) . ":"
-                            . __LINE__
-                            . " dbg disk_root_name=$disk_root_dbg" );
-          $app->log->debug(   basename( __FILE__ ) . ":"
-                            . __LINE__
-                            . " dbg savepath_before=$savepath" );
-          $app->log->debug(   basename( __FILE__ ) . ":"
-                            . __LINE__
-                            . " dbg savepath_after="
+                            . "\n\tdbg disk_file_dir=$disk_file_dir_dbg"
+                            . "\n\tdbg disk_parent_dir=$disk_parent_dir_dbg"
+                            . "\n\tdbg disk_root_name=$disk_root_dbg"
+                            . "\n\tdbg savepath_before=$savepath"
+                            . "\n\tdbg savepath_after="
                             . ( $munged_save_dbg || '(empty)' ) );
 
           if ( ref( $rename_dbg ) eq 'HASH' ) {
@@ -886,6 +903,13 @@ queue_n: "
             );
       }
 
+      # but if we returned (0,"no_hit") from inside eval, it did NOT die.
+      # So we need to check whether $savepath was set:
+      unless ( $savepath ) {
+        my $back = $c->req->headers->referrer
+            // '/torrents';    # or '/qbt/add_one'
+        return $c->redirect_to( $back );
+      }
       my $body = $add->{body} // '';
       $app->log->debug( basename( __FILE__ ) . ":"
         . __LINE__
@@ -1065,7 +1089,7 @@ queue_n: "
       return $c->redirect_to( '/qbt/hashnames' );
     } );
 
-  $r->get(    # page view
+  $r->get(    # Page_View
    '/torrents' => sub {
      my $c = shift;
      $c->stash( dev_mode => ( $opts->{dev_mode} ? 1 : 0 ) );
@@ -1089,9 +1113,14 @@ queue_n: "
 
 # ---------- Runtime overlay: things we already touched this server run ----------
      $c->app->defaults->{runtime} ||= {};
-     $c->app->defaults->{runtime}{processed} ||=
-         {};    # { ih => { status, ts, ... } }
+     $c->app->defaults->{runtime}{processed} ||= {};
      my $processed = $c->app->defaults->{runtime}{processed};
+
+# ---------- Classes overlay (NO_HITS should disappear from Page_View list) ----------
+     $c->app->defaults->{classes} ||= {};
+     $c->app->defaults->{classes}{NO_HITS} ||= {};
+     my $no_hits = $c->app->defaults->{classes}{NO_HITS};
+     $no_hits = {} if ref( $no_hits ) ne 'HASH';
 
      # ---------- Load local cache ----------
      my ( $local_by_ih, $mtime, $src ) =
@@ -1131,6 +1160,7 @@ queue_n: "
      for my $ih ( keys %$local_by_ih ) {
        next unless defined $ih && $ih =~ /^[0-9a-f]{40}$/;
        next if exists $processed->{$ih};
+       next if exists $no_hits->{$ih};
 
        my $rec = $local_by_ih->{$ih};
        next unless ref( $rec ) eq 'HASH';
@@ -1242,6 +1272,60 @@ queue_n: "
      return $c->render( template => 'torrents' );
    } );
 
+  $r->get(
+    '/qbt/no_hits' => sub {
+      my $c = shift;
+
+      my $h = $c->app->defaults->{classes}{NO_HITS};
+      $h = {} if ref( $h ) ne 'HASH';
+
+      # Sort newest-first (or flip comparator if you want oldest-first)
+      my @keys =
+          sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) }
+          keys %$h;    # newest first
+
+      my @rows = map { $h->{$_} } @keys;
+
+      $c->stash( found => scalar( @rows ),
+                 rows  => \@rows, );
+      return $c->render( template => 'qbt_no_hits' );
+    } );
+
+  $r->post(
+    '/qbt/refresh_no_hits' => sub {
+      my $c = shift;
+
+      $c->app->log->debug( prefix_dbg() . "REQ POST /qbt/refresh_no_hits" );
+
+      # “Refresh” just bounces back; NO_HITS data is in-memory anyway.
+      # If later we store to disk, this is where we'd reload it.
+      return $c->redirect_to( '/qbt/no_hits' );
+    } );
+
+  $r->get(
+    '/qbt/no_hits' => sub {
+      my $c = shift;
+
+      my $h = $c->app->defaults->{classes}{NO_HITS} || {};
+
+      my @rows = map { $h->{$_} }
+          sort keys %$h;
+
+      $c->stash( found => scalar( @rows ),
+                 rows  => \@rows, );
+
+      return $c->render( template => 'qbt_no_hits' );
+    } );
+
+  $r->post(
+    '/qbt/clear_no_hits' => sub {
+      my $c = shift;
+
+      $c->app->defaults->{no_hits} = {};
+      $c->app->log->debug( prefix_dbg() . "cleared no_hits" );
+      return $c->redirect_to( '/qbt/no_hits' );
+    } );
+
   # ---------- Idle observer tick ----------
   my $tick_seconds = 5;
   QBTL::Queue->start( $app, opts => $opts, tick_seconds => $tick_seconds );
@@ -1252,6 +1336,16 @@ queue_n: "
 1;
 
 =pod
+
+#   $r->post(
+#     '/qbt/refresh_hashname' => sub {
+#       my $c = shift;
+#
+#       my $qbt = QBTL::QBT->new( {} );
+#
+#     # simplest: just bounce back to list; list route will re-snapshot qbt anyway
+#       return $c->redirect_to( '/qbt/hashnames' );
+#     } );
 
 # sub _add_one_current {
 #   my ( $app ) = @_;

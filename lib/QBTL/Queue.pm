@@ -1,8 +1,9 @@
 package QBTL::Queue;
 
 use common::sense;
-use Cwd   qw( abs_path );
-use POSIX qw(strftime);
+use Cwd            qw( abs_path );
+use POSIX          qw(strftime);
+use File::Basename qw( dirname basename);
 use Mojo::IOLoop;
 
 use QBTL::QBT;
@@ -13,7 +14,8 @@ use QBTL::Utils    qw(
     prefix_dbg
 );
 
-use File::Basename qw( dirname basename);
+use Exporter 'import';
+our @EXPORT_OK = qw( classify_no_hits );
 
 my %REQUEUE_POLICY = (
   renamed_root_class => sub {
@@ -77,6 +79,27 @@ sub stop {
 # ------------------------------
 # State storage
 # ------------------------------
+
+sub classify_no_hits {
+  my ( $app, $rec, $why ) = @_;
+  return 0 unless $app && ref( $rec ) eq 'HASH';
+
+  my $ih = $rec->{ih} // '';
+  return 0 unless $ih =~ /^[0-9a-f]{40}$/;
+
+  $app->defaults->{classes} ||= {};
+  $app->defaults->{classes}{NO_HITS} ||= {};
+  my $h = $app->defaults->{classes}{NO_HITS};
+
+  # Store-time normalization: ensure the record is self-contained.
+  $h->{$ih} = {
+               %$rec,
+               ih  => $ih,
+               ts  => time,
+               why => ( $why // 'no_hit' ),};
+
+  return 1;
+}
 
 sub _bless_paths {
   my ( $app, $qbt, $job, $tick_cache, %opt ) = @_;
@@ -533,19 +556,19 @@ sub pump_tick {
                 . " wait: "
                 . sprintf( "% +ds", $wait ) );
 
-    my $is_terminal = ( $status =~ /^(done|failed|needs_user|needs_triage)$/ );
+    my $is_terminal =
+        ( $status =~ /^(done|failed|needs_user|needs_triage|no_hits)$/ );
     if ( $is_terminal ) {
       delete $job->{next_ts};
 
       next if $job->{terminal_logged};
       $job->{terminal_logged} = 1;
 
-      $app->log->debug(
-              prefix_dbg()
-            . " [JOB] ih: "
-            . short_ih( $ih )
-            . " status = $status stage = $stage step_idx =
-          $step_idx ( terminal ) " );
+      $app->log->debug(   prefix_dbg()
+                        . "  [JOB] ih: "
+                        . short_ih( $ih )
+                        . " status = $status stage = $stage step_idx:"
+                        . " $step_idx ( terminal ) " );
       next;
     }
 

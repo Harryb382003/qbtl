@@ -1,9 +1,11 @@
 package QBTL::SavePath;
 
 use common::sense;
-use Exporter 'import';
 use File::Basename qw( dirname basename);
 
+use QBTL::Queue qw ( classify_no_hits );
+
+use Exporter 'import';
 our @EXPORT_OK = qw(
     munge_savepath_and_root_rename
     derive_savepath_from_payload
@@ -11,9 +13,9 @@ our @EXPORT_OK = qw(
 );
 
 sub derive_savepath_from_payload {
-  my ( %args ) = @_;
-  my $rec      = $args{rec} || {};
-  my $dbg      = $args{debug};       # optional arrayref
+  my ( $app, $ih, %args ) = @_;
+  my $rec = $args{rec} || {};
+  my $dbg = $args{debug};       # optional arrayref
 
   return ( undef, "bad rec" ) if ref( $rec ) ne 'HASH';
   my $files = $rec->{files};
@@ -52,7 +54,7 @@ sub derive_savepath_from_payload {
     $attempt{hit_size} = $hit // '';
 
 # If size-locked search misses, retry without size (renames/metadata quirks happen)
-    if ( !$hit ) {
+    unless ( $hit ) {
       $hit = QBTL::Utils::locate_payload_files_named( $leaf );
       $attempt{hit_any} = $hit // '';
     }
@@ -60,6 +62,23 @@ sub derive_savepath_from_payload {
     unless ( $hit && -f $hit ) {
       $attempt{reject} = "no_hit";
       $push_dbg->( \%attempt );
+
+      # Preserve instead of vaporize
+      QBTL::Queue::classify_no_hits(
+                                     $app,
+                                     {
+                                      ih          => $ih,
+                                      name        => ( $attempt{name}   // '' ),
+                                      bucket      => ( $attempt{bucket} // '' ),
+                                      source_path =>
+                                          ( $attempt{source_path} // '' ),
+                                      total_size =>
+                                          ( $attempt{total_size} // 0 ),
+                                      files   => ( $attempt{files}   // [] ),
+                                      tracker => ( $attempt{tracker} // '' ),
+                                     },
+                                     'no_hit: payload not found' );
+
       next;
     }
 
