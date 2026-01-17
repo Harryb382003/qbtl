@@ -6,7 +6,38 @@
 % if (!$found) {
   <p>No torrents currently classified as NO_HITS.</p>
 % } else {
-  <table>
+
+  <style>
+    table.qbtl-table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 0.75rem;
+    }
+    table.qbtl-table th,
+    table.qbtl-table td {
+      border: 1px solid #bbb;
+      padding: 0.4rem 0.6rem;
+      vertical-align: top;
+      text-align: left;
+    }
+    table.qbtl-table th {
+      background: #eee;
+      font-weight: 600;
+    }
+    table.qbtl-table tr:nth-child(even) td {
+      background: #fafafa;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.95em;
+      white-space: nowrap;
+    }
+    .wrap {
+      word-break: break-word;
+    }
+  </style>
+
+  <table class="qbtl-table">
     <tr>
       <th>Infohash</th>
       <th>Reason</th>
@@ -15,16 +46,12 @@
 
     % for my $r (@$rows) {
       <tr>
-        <td><%= $r->{ih} %></td>
-        <td><%= $r->{why} %></td>
-        <td>
-          <%= $r->{ts}
-                ? scalar localtime($r->{ts})
-                : '' %>
+        <td class="mono"><%= $r->{ih} // '' %></td>
+        <td class="wrap"><%= $r->{why} // '' %></td>
+        <td class="mono">
+          <%= $r->{ts} ? scalar localtime($r->{ts}) : '' %>
         </td>
       </tr>
     % }
   </table>
 % }
-
-

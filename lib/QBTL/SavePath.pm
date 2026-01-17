@@ -3,7 +3,7 @@ package QBTL::SavePath;
 use common::sense;
 use File::Basename qw( dirname basename);
 
-use QBTL::Queue qw ( classify_no_hits );
+use QBTL::Classify qw ( classify_no_hits );
 
 use Exporter 'import';
 our @EXPORT_OK = qw(
@@ -64,20 +64,22 @@ sub derive_savepath_from_payload {
       $push_dbg->( \%attempt );
 
       # Preserve instead of vaporize
-      QBTL::Queue::classify_no_hits(
-                                     $app,
-                                     {
-                                      ih          => $ih,
-                                      name        => ( $attempt{name}   // '' ),
-                                      bucket      => ( $attempt{bucket} // '' ),
-                                      source_path =>
-                                          ( $attempt{source_path} // '' ),
-                                      total_size =>
-                                          ( $attempt{total_size} // 0 ),
-                                      files   => ( $attempt{files}   // [] ),
-                                      tracker => ( $attempt{tracker} // '' ),
-                                     },
-                                     'no_hit: payload not found' );
+      QBTL::Classify::classify_no_hits(
+                                        $app,
+                                        {
+                                         ih     => $ih,
+                                         name   => ( $attempt{name}   // '' ),
+                                         bucket => ( $attempt{bucket} // '' ),
+                                         source_path => (
+                                                     $attempt{source_path} // ''
+                                         ),
+                                         total_size => (
+                                                       $attempt{total_size} // 0
+                                         ),
+                                         files   => ( $attempt{files}   // [] ),
+                                         tracker => ( $attempt{tracker} // '' ),
+                                        },
+                                        'no_hit: payload not found' );
 
       next;
     }

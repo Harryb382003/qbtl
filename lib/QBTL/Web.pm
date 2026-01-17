@@ -6,12 +6,17 @@ use File::Spec;
 use File::Basename qw(dirname basename);
 use FindBin        qw($Bin);
 use Mojolicious;
-use Mojo::JSON qw(true);
+use Mojo::JSON   qw(true);
+use Scalar::Util qw(refaddr);
 
 use QBTL::LocalCache;
 use QBTL::Logger;
 use QBTL::QBT;
-use QBTL::Queue    qw ( classify_no_hits );
+use QBTL::Classify qw (
+    classify_triage
+    classify_no_hits
+);
+use QBTL::Queue;
 use QBTL::SavePath qw(
     munge_savepath_and_root_rename
     torrent_top_lvl_from_rec
@@ -311,7 +316,7 @@ sub app {
       my ( $qbt_by_ih, $qbt_list );
       my $qbt_err = '';
       eval {
-        my $qbt = QBTL::QBT->new( {} );
+        my $qbt = QBTL::QBT->new( {app => $c->app} );
         $qbt_by_ih = $qbt->api_torrents_infohash_map();
         $qbt_by_ih = {} if ref( $qbt_by_ih ) ne 'HASH';
         $qbt_list  = $qbt->api_torrents_info() || [];
@@ -501,7 +506,7 @@ sub app {
       $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
 
       # Pull qbt snapshot ONLY when we need to (queue build / rebuild)
-      my $qbt       = QBTL::QBT->new( {} );
+      my $qbt       = QBTL::QBT->new( {app => $c->app} );
       my $qbt_by_ih = $qbt->api_torrents_infohash_map;
       $qbt_by_ih = {} if ref( $qbt_by_ih ) ne 'HASH';
 
@@ -642,7 +647,7 @@ sub app {
       $c->app->defaults->{runtime}{processed} ||= {};
       my $processed = $c->app->defaults->{runtime}{processed};
 
-      my $qbt = QBTL::QBT->new( {} );
+      my $qbt = QBTL::QBT->new( {app => $c->app} );
 
 # --- Pre-check: already exists in qBittorrent? (stale queue / already added) ---
       my $exists = eval {
@@ -768,8 +773,21 @@ sub app {
 
           classify_no_hits( $app, $nohit, "savepath_not_found" );
 
+          _add_one_mark_fail( $c->app, $hash, "NO_HITS: savepath_not_found" )
+              ;                               # optional
+          _add_one_remove_hash( $c->app, $hash );
+
+          my $st = _add_one_state( $c->app );
+          $app->log->debug( basename( __FILE__ ) . ":"
+                 . __LINE__
+                 . " [add_one] NO_HITS removed ih=$hash idx=$st->{idx} queue_n="
+                 . scalar( @{$st->{queue} || []} ) );
+
+  # then bounce back to referrer (or torrents) instead of rendering the red page
+          return $c->redirect_to( $c->req->headers->referrer // '/torrents' );
+
           # signal to caller that we “handled” this ih as NO_HITS
-          $add = 0;                           # if you use $add later
+          $add = 0;    # if you use $add later
           return ( 0, "no_hit" );
         }
 
@@ -881,7 +899,17 @@ sub app {
         chomp $err;
 
         _add_one_mark_fail( $c->app, $hash, $err );
-
+        classify_triage(
+                         $c->app,
+                         {
+                          ih          => $hash,
+                          key         => 'add_one_eval',
+                          path        => '/qbt/add_one',
+                          err         => $err,
+                          source_path => $source_path,
+                          savepath    => ( $savepath || '' ),
+                         },
+                         'add_one_failed', );
         $processed->{$hash} = {
                                status      => 'failed',
                                ts          => time,
@@ -891,10 +919,10 @@ sub app {
 
         _add_one_remove_hash( $c->app, $hash );
         my $st = _add_one_state( $c->app );
-        $app->log->debug(
-          basename( __FILE__ ) . ":" . __LINE__ . "
- [add_one] after remove ih: $hash idx: $st->{idx} queue_n: "
-              . scalar( @{$st->{queue} || []} ) );
+        $app->log->debug( basename( __FILE__ ) . ":"
+                . __LINE__
+                . "  [add_one] after remove ih: $hash idx: $st->{idx} queue_n: "
+                . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
@@ -1025,23 +1053,13 @@ sub app {
 
     } );
 
-#   $r->post(
-#     '/qbt/refresh_hashname' => sub {
-#       my $c = shift;
-#
-#       my $qbt = QBTL::QBT->new( {} );
-#
-#     # simplest: just bounce back to list; list route will re-snapshot qbt anyway
-#       return $c->redirect_to( '/qbt/hashnames' );
-#     } );
-
   $r->get(
     '/qbt/hashnames' => sub {
       my $c = shift;
 
       $c->app->log->debug( prefix_dbg() . " ENTER /qbt/hashnames" );
       my $t0  = time;
-      my $qbt = QBTL::QBT->new( {} );
+      my $qbt = QBTL::QBT->new( {app => $c->app} );
 
       # pull fresh every time (for now)
       my $list = $qbt->api_torrents_info() || [];
@@ -1076,6 +1094,25 @@ sub app {
       return $c->render( template => 'qbt_hashnames' );
     } );
 
+  $r->get(
+    '/qbt/no_hits' => sub {
+      my $c = shift;
+
+      my $h = $c->app->defaults->{classes}{NO_HITS};
+      $h = {} if ref( $h ) ne 'HASH';
+
+      # Sort newest-first (or flip comparator if you want oldest-first)
+      my @keys =
+          sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) }
+          keys %$h;    # newest first
+
+      my @rows = map { $h->{$_} } @keys;
+
+      $c->stash( found => scalar( @rows ),
+                 rows  => \@rows, );
+      return $c->render( template => 'qbt_no_hits' );
+    } );
+
   $r->post(
     '/qbt/refresh_hashnames' => sub {
       my $c  = shift;
@@ -1089,6 +1126,65 @@ sub app {
       return $c->redirect_to( '/qbt/hashnames' );
     } );
 
+  $r->post(
+    '/qbt/refresh_no_hits' => sub {
+      my $c = shift;
+
+      $c->app->log->debug( prefix_dbg() . "REQ POST /qbt/refresh_no_hits" );
+
+      # “Refresh” just bounces back; NO_HITS data is in-memory anyway.
+      # If later we store to disk, this is where we'd reload it.
+      return $c->redirect_to( '/qbt/no_hits' );
+    } );
+
+  $r->get(
+    '/qbt/triage' => sub {
+      my $c = shift;
+
+      my $app_id = refaddr( $c->app );
+      $c->app->log->debug( prefix_dbg() . " TRIAGE app_id=$app_id" );
+
+      $c->app->defaults->{classes} ||= {};
+
+      if ( ref( $c->app->defaults->{classes}{TRIAGE} ) ne 'HASH' ) {
+        $c->app->defaults->{classes}{TRIAGE} = {};
+      }
+
+      my $h = $c->app->defaults->{classes}{TRIAGE};
+
+      $c->app->log->debug(   prefix_dbg()
+                           . " TRIAGE ref="
+                           . ( ref( $h ) || '(undef)' )
+                           . " keys="
+                           . scalar( keys %$h ) );
+
+      my @ids =
+          sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) } keys %$h;
+
+      my @rows = map {
+        my $id  = $_;
+        my $rec = $h->{$id};
+        $rec = {} if ref( $rec ) ne 'HASH';
+        +{id => $id, %$rec}
+      } @ids;
+
+      $c->stash( found => scalar( @rows ),
+                 rows  => \@rows, );
+
+      $c->app->log->debug(
+                          prefix_dbg() . " TRIAGE keys=" . scalar( keys %$h ) );
+
+      return $c->render( template => 'qbt_triage' );
+    } );
+
+  $r->post(
+    '/qbt/clear_no_hits' => sub {
+      my $c = shift;
+
+      $c->app->defaults->{no_hits} = {};
+      $c->app->log->debug( prefix_dbg() . "cleared no_hits" );
+      return $c->redirect_to( '/qbt/no_hits' );
+    } );
   $r->get(    # Page_View
    '/torrents' => sub {
      my $c = shift;
@@ -1138,7 +1234,7 @@ sub app {
      if ( !$c->app->defaults->{qbt_by_ih} || ( time - $snap_ts ) > $snap_ttl ) {
        my $qbt_by_ih = {};
        eval {
-         my $qbt = QBTL::QBT->new( {} );
+         my $qbt = QBTL::QBT->new( {app => $c->app} );
          $qbt_by_ih = $qbt->api_torrents_infohash_map;
          $qbt_by_ih = {} if ref( $qbt_by_ih ) ne 'HASH';
          1;
@@ -1273,57 +1369,20 @@ sub app {
    } );
 
   $r->get(
-    '/qbt/no_hits' => sub {
+    '/qbt/triage_test' => sub {
       my $c = shift;
 
-      my $h = $c->app->defaults->{classes}{NO_HITS};
-      $h = {} if ref( $h ) ne 'HASH';
+      QBTL::Classify::classify_triage(
+                                       $c->app,
+                                       {
+                                        ih   => 'a' x 40,
+                                        key  => 'test',
+                                        path => '/qbt/triage_test',
+                                        err  => 'hello'
+                                       },
+                                       'test_insert' );
 
-      # Sort newest-first (or flip comparator if you want oldest-first)
-      my @keys =
-          sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) }
-          keys %$h;    # newest first
-
-      my @rows = map { $h->{$_} } @keys;
-
-      $c->stash( found => scalar( @rows ),
-                 rows  => \@rows, );
-      return $c->render( template => 'qbt_no_hits' );
-    } );
-
-  $r->post(
-    '/qbt/refresh_no_hits' => sub {
-      my $c = shift;
-
-      $c->app->log->debug( prefix_dbg() . "REQ POST /qbt/refresh_no_hits" );
-
-      # “Refresh” just bounces back; NO_HITS data is in-memory anyway.
-      # If later we store to disk, this is where we'd reload it.
-      return $c->redirect_to( '/qbt/no_hits' );
-    } );
-
-  $r->get(
-    '/qbt/no_hits' => sub {
-      my $c = shift;
-
-      my $h = $c->app->defaults->{classes}{NO_HITS} || {};
-
-      my @rows = map { $h->{$_} }
-          sort keys %$h;
-
-      $c->stash( found => scalar( @rows ),
-                 rows  => \@rows, );
-
-      return $c->render( template => 'qbt_no_hits' );
-    } );
-
-  $r->post(
-    '/qbt/clear_no_hits' => sub {
-      my $c = shift;
-
-      $c->app->defaults->{no_hits} = {};
-      $c->app->log->debug( prefix_dbg() . "cleared no_hits" );
-      return $c->redirect_to( '/qbt/no_hits' );
+      return $c->redirect_to( '/qbt/triage' );
     } );
 
   # ---------- Idle observer tick ----------
@@ -1337,11 +1396,37 @@ sub app {
 
 =pod
 
+
+
 #   $r->post(
 #     '/qbt/refresh_hashname' => sub {
 #       my $c = shift;
 #
-#       my $qbt = QBTL::QBT->new( {} );
+#       my $qbt = QBTL::QBT->new({ app => $c->app });
+#
+#     # simplest: just bounce back to list; list route will re-snapshot qbt anyway
+#       return $c->redirect_to( '/qbt/hashnames' );
+#     } );
+
+#   $r->get(
+#     '/qbt/no_hits' => sub {
+#       my $c = shift;
+#
+#       my $h = $c->app->defaults->{classes}{NO_HITS} || {};
+#
+#       my @rows = map { $h->{$_} }
+#           sort keys %$h;
+#
+#       $c->stash( found => scalar( @rows ),
+#                  rows  => \@rows, );
+#
+#       return $c->render( template => 'qbt_no_hits' );
+#     } );
+#   $r->post(
+#     '/qbt/refresh_hashname' => sub {
+#       my $c = shift;
+#
+#       my $qbt = QBTL::QBT->new({ app => $c->app });
 #
 #     # simplest: just bounce back to list; list route will re-snapshot qbt anyway
 #       return $c->redirect_to( '/qbt/hashnames' );
@@ -1472,7 +1557,7 @@ sub app {
 #
 #   my $qbt;
 #   eval {
-#     $qbt = QBTL::QBT->new( $opts );
+#     $qbt = QBTL::QBT->new( { app => $c->app } );
 #     1;
 #   } or do {
 #     my $err = "$@";
@@ -1551,7 +1636,7 @@ sub app {
 #              $app->defaults->{qbt_by_ih} || {} );
 #   }
 #
-#   my $qbt  = QBTL::QBT->new( $opts );
+#   my $qbt  = QBTL::QBT->new( { app => $c->app } );
 #   my $list = $qbt->api_torrents_info() || [];
 #
 #   my %by;

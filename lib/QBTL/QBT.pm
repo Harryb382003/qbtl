@@ -26,55 +26,136 @@ sub _api_post_form {
   my $url = "$self->{base_url}$path";
 
   for my $attempt ( 1 .. 2 ) {
+    my $res;
+    my $ok = eval {
 
-    # Force deterministic x-www-form-urlencoded encoding
-    my $u = URI->new( $url );
-    $u->query_form( %$form_href );
+      # Force deterministic x-www-form-urlencoded encoding
+      my $u = URI->new( $url );
+      $u->query_form( %$form_href );
 
-    my $req = HTTP::Request->new( POST => $u->as_string );
-    $req->header( 'Content-Type' => 'application/x-www-form-urlencoded' );
+      my $req = HTTP::Request->new( POST => $u->as_string );
+      $req->header( 'Content-Type' => 'application/x-www-form-urlencoded' );
 
-    # move params from URL into body (what qBt expects)
-    my $body = $u->query // '';
-    $u->query( undef );
-    $req->uri( $u );
-    $req->content( $body );
+      # move params from URL into body (what qBt expects)
+      my $body = $u->query // '';
+      $u->query( undef );
+      $req->uri( $u );
+      $req->content( $body );
 
-    if ( $self->{debug_http} ) {
-      warn "[QBTL::QBT] POST $path\n";
-      warn "[QBTL::QBT] url=" . $u->as_string . "\n";
-      warn "[QBTL::QBT] body=$body\n";
+      if ( $self->{debug_http} ) {
+        warn "[QBTL::QBT] POST $path\n";
+        warn "[QBTL::QBT] url=" . $u->as_string . "\n";
+        warn "[QBTL::QBT] body=$body\n";
+      }
+
+      $res = $self->{ua}->request( $req );
+      1;
+    };
+
+    unless ( $ok ) {
+      my $e = "$@";
+      chomp $e;
+
+      # TRIAGE (best-effort, never die from triage itself)
+      if ( my $app = $self->{app} ) {
+        eval {
+          my $ih = '';
+
+        # best-effort: some endpoints use 'hashes' (pipe-separated), some 'hash'
+          if ( exists $form_href->{hash} ) {
+            $ih = $form_href->{hash} // '';
+          }
+          elsif ( exists $form_href->{hashes} ) {
+            $ih = $form_href->{hashes} // '';
+          }
+
+          QBTL::Classify::classify_triage(
+                                           $app,
+                                           {
+                                            ih   => $ih,
+                                            key  => 'qbt_post_form',
+                                            path => $path,
+                                            err  => $e,
+                                           },
+                                           'http_message_bytes', );
+          1;
+        };
+      }
+
+      return
+          $self->_fail(
+                        "POST failed: $path: "
+                            . ( $res ? $res->status_line : '(no response)' ),
+                        {
+                         path => $path,
+                         ih   => (
+                                $form_href->{hash} // $form_href->{hashes} // ''
+                         ),
+                         ok   => 0,
+                         code => ( $res ? ( $res->code // 0 ) : 0 ),
+                         body => (
+                                   $res ? ( $res->decoded_content // '' ) : ''
+                         ),
+                        } );
     }
 
-    my $res = $self->{ua}->request( $req );
-
     # success
-    if ( $res->is_success ) {
+    if ( $res && $res->is_success ) {
       return {
               ok   => 1,
               code => ( $res->code            // 200 ),
               body => ( $res->decoded_content // '' ),};
     }
 
-    my $code = $res->code // 0;
+    my $code = $res ? ( $res->code // 0 ) : 0;
 
     # auth/session died -> login then retry once
     if ( ( $code == 401 || $code == 403 ) && $attempt == 1 ) {
       my $login = eval { $self->api_qbt_login() };
       next if !$@ && ref( $login ) eq 'HASH' && $login->{ok};
-
-      # login failed -> fall through to failure below
     }
 
     return
         $self->_fail(
-                      "POST failed: $path: " . $res->status_line,
+                      "POST failed: $path: "
+                          . ( $res ? $res->status_line : '(no response)' ),
                       {
                        ok   => 0,
-                       code => ( $res->code            // 0 ),
-                       body => ( $res->decoded_content // '' ),
+                       code => ( $res ? ( $res->code // 0 ) : 0 ),
+                       body => (
+                                 $res ? ( $res->decoded_content // '' ) : ''
+                       ),
                       } );
   }
+}
+
+sub _fail {
+  my ( $self, $msg, $extra ) = @_;
+  $extra ||= {};
+
+  # TRIAGE (best-effort; never die from triage)
+  if ( my $app = $self->{app} ) {
+    eval {
+      QBTL::Classify::classify_triage(
+                                       $app,
+                                       {
+                                        ih   => ( $extra->{ih} // '' ),
+                                        key  => 'qbt_fail',
+                                        path => ( $extra->{path} // '' ),
+                                        err  => $msg,
+                                        code => ( $extra->{code} // 0 ),
+                                        body => ( $extra->{body} // '' ),
+                                       },
+                                       'qbt_fail', );
+      1;
+    };
+  }
+
+  return {
+          ok   => 0,
+          code => ( $extra->{code} // 0 ),
+          body => ( $extra->{body} // '' ),
+          err  => $msg,};
 }
 
 # ------------------------------
@@ -83,19 +164,21 @@ sub _api_post_form {
 # ------------------------------
 
 sub new {
-
   my ( $class, $opts ) = @_;
   $opts ||= {};
 
-  my $self = {
-              base_url     => $opts->{base_url}     || 'http://localhost:8080',
-              username     => $opts->{username}     || 'admin',
-              password     => $opts->{password}     || 'adminadmin',
-              die_on_error => $opts->{die_on_error} || 0,
-              ua => LWP::UserAgent->new( cookie_jar => HTTP::Cookies->new ),
-              %$opts,};
+  my $self = {%$opts};
 
+  $self->{base_url}     ||= 'http://localhost:8080';
+  $self->{username}     ||= 'admin';
+  $self->{password}     ||= 'adminadmin';
+  $self->{die_on_error} ||= 0;
+
+  $self->{ua} ||= LWP::UserAgent->new( cookie_jar => HTTP::Cookies->new );
+  warn "[QBTL::QBT] new app_id="
+      . ( defined( $self->{app} ) ? ( 0 + $self->{app} ) : 'undef' ) . "\n";
   bless $self, $class;
+  return $self;
 }
 
 sub api_qbt_login {
@@ -482,17 +565,6 @@ sub _validate_hashes_pipe {
 
   die "bad hashes" unless $h =~ /^[0-9a-f]{40}(?:\|[0-9a-f]{40})*$/;
   return $h;
-}
-
-sub _fail {
-  my ( $self, $msg, $out ) = @_;
-  $out ||= {ok => 0};
-
-  $out->{ok}  = 0    unless defined $out->{ok};
-  $out->{err} = $msg unless defined $out->{err} && length $out->{err};
-
-  die $msg if $self->{die_on_error};
-  return $out;
 }
 
 sub _api_torrents_add__multipart {

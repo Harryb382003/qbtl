@@ -1,0 +1,42 @@
+% layout 'main';
+% title 'Triage';
+
+<h2>Triage (<%= $found %>)</h2>
+
+% if (!$found) {
+  <p>No triage entries this run.</p>
+% } else {
+
+  <style>
+    table.triage { border-collapse: collapse; width: 100%; }
+    table.triage th, table.triage td { border: 1px solid #999; padding: 6px 8px; vertical-align: top; }
+    table.triage th { text-align: left; white-space: nowrap; }
+    table.triage td.small { white-space: nowrap; font-family: monospace; }
+    table.triage td.path { font-family: monospace; }
+    table.triage pre.err { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: monospace; }
+  </style>
+
+  <table class="triage">
+    <tr>
+      <th>Id</th>
+      <th>When</th>
+      <th>Why</th>
+      <th>IH</th>
+      <th>Key</th>
+      <th>Path</th>
+      <th>Error</th>
+    </tr>
+
+    % for my $r (@$rows) {
+      <tr>
+        <td class="small"><%= $r->{id} // '' %></td>
+        <td class="small"><%= $r->{ts} ? scalar localtime($r->{ts}) : '' %></td>
+        <td><%= $r->{why} // '' %></td>
+        <td class="small"><%= $r->{ih} // '' %></td>
+        <td><%= $r->{key} // '' %></td>
+        <td class="path"><%= $r->{path} // '' %></td>
+        <td><pre class="err"><%= $r->{err} // '' %></pre></td>
+      </tr>
+    % }
+  </table>
+% }

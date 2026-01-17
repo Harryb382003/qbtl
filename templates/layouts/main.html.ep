@@ -40,6 +40,7 @@
     <a class="navbtn" href="/">Home</a>
     <a class="navbtn" href="/qbt/hashnames">QBT hash-names</a>
     <a class="navbtn" href="/qbt/repairable">Repairable</a>
+    <a class="navbtn" href="/qbt/triage">Triage</a>
     <a class="navbtn" href="/torrents">Page View</a>
     <a class="navbtn" href="/qbt/add_one">Single View</a>
     <a class="navbtn" href="/qbt/no_hits">No Hits</a>
