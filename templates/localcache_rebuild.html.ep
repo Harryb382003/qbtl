@@ -1,9 +1,7 @@
 % layout 'main';
 % title 'Rebuild local cache';
 
-<h1>Rebuild local cache</h1>
-% my $ts = stash('local_cache_mtime') || 0;
-% my $pretty = $ts ? scalar(localtime($ts)) : 'never';
+<h1>Rebuilding local cache…</h1>
 
 <style>
   .qbtl-spinner {
@@ -20,33 +18,28 @@
   @keyframes qbtl-spin { to { transform: rotate(360deg); } }
 </style>
 
+<p><span class="qbtl-spinner"></span>Please wait…</p>
+
 <form id="rebuildForm" method="post" action="/localcache/rebuild">
-  <button id="rebuildBtn" type="submit">
-    Rebuild Cache<br>
-    <small>Last: <%= $pretty %></small>
-  </button>
+  <input type="hidden" name="tok" value="<%= $rebuild_tok %>">
+  <noscript><button type="submit">Rebuild Cache</button></noscript>
 </form>
 
 <script>
-  (function () {
-    var form = document.getElementById('rebuildForm');
-    var btn  = document.getElementById('rebuildBtn');
-    if (!form || !btn) return;
-
-    var original = btn.innerHTML;
-
-    form.addEventListener('submit', function () {
-      btn.disabled = true;
-      btn.innerHTML =
-        '<span class="qbtl-spinner"></span>Rebuilding…<br><small>Please wait</small>';
-    });
-
-    // If user hits back and the browser restores the page from bfcache,
-    // re-enable button.
-    window.addEventListener('pageshow', function () {
-      btn.disabled = false;
-      btn.innerHTML = original;
-    });
-  })();
+(function () {
+  function poll() {
+    fetch('/localcache/rebuild_status', {cache: 'no-store'})
+      .then(r => r.json())
+      .then(st => {
+        // done ONLY when we have proof a rebuild was started
+        if (st && st.inflight === 0 && st.done_ts) {
+          window.location = '/';
+          return;
+        }
+        setTimeout(poll, 5000);
+      })
+      .catch(() => setTimeout(poll, 5000));
+  }
+  poll();
+})();
 </script>
-

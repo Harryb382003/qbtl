@@ -26,6 +26,11 @@
       box-sizing:border-box;
       user-select:none;
     }
+    .nav-notice {
+      margin-left: 1em;
+      color: #c00;
+      font-weight: bold;
+    }
     a.navbtn:hover, button.navbtn:hover{background:#ececec;}
     button.navbtn{appearance:none;-webkit-appearance:none;}
 
@@ -37,6 +42,9 @@
 </head>
 <body>
   <div class="navbar">
+      % my $ts = stash('local_cache_mtime') // app->defaults->{local_cache_mtime} // 0;
+      % my $label = $ts ? scalar(localtime($ts)) : 'never';
+
     <a class="navbtn" href="/">Home</a>
     <a class="navbtn" href="/qbt/hashnames">QBT hash-names</a>
     <a class="navbtn" href="/qbt/repairable">Repairable</a>
@@ -44,23 +52,31 @@
     <a class="navbtn" href="/torrents">Page View</a>
     <a class="navbtn" href="/qbt/add_one">Single View</a>
     <a class="navbtn" href="/qbt/no_hits">No Hits</a>
+
+    % if (app->defaults->{local_cache}{rebuilding}) {
+        <span class="nav-notice">Rebuilding local cache…</span>
+    % }
     % if (stash('dev_mode')) {
-      % my $ts = stash('local_cache_mtime') // app->defaults->{local_cache_mtime} // 0;
-      % my $label = $ts ? scalar(localtime($ts)) : 'never';
+    % my $notice = stash('notice') // flash('notice');
+    % if ($notice) {
+  <div class="notice"><%= $notice %></div>
+    % }
+
+<form method="post" action="/localcache/rebuild">
+  <input type="hidden" name="tok" value="<%= stash('rebuild_tok') // '' %>">
+  <button class="navbtn navbtn--wide" type="submit">Rebuild Cache<br>
+    <small>Last: <%= $label %></small>
+  </button>
+</form>
+
       <form method="post" action="/tasks/poll">
         <button class="navbtn navbtn--wide" type="submit">Poll recheck → maybe resume</button>
       </form>
-      <form method="post" action="/localcache/rebuild">
-        <button class="navbtn navbtn--wide" type="submit">Rebuild Cache<br>
-          <small>Last: <%= $label %></small>
-        </button>
-      </form>
+
+
       <form method="post" action="/restart">
         <button class="navbtn" type="submit">Restart server (dev)</button>
       </form>
-    % }
-    % if (stash('notice')) {
-      <div class="notice"><%= stash('notice') %></div>
     % }
   </div>
 

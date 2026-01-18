@@ -510,7 +510,6 @@ sub process_all_infohashes {
   QBTL::Logger::info( "[MAIN] Finished process_all_infohashes()" );
 }
 
-
 # ---------------------------
 #       internal helpers
 # ---------------------------
@@ -545,6 +544,10 @@ sub _sh_single_quote {
   $s =~ s/'/'"'"'/g;
   return "'$s'";
 }
+
+1;
+
+=pod
 
 # sub normalize_filename {
 #   my ($l_parsed, $opts, $stats) = @_;
@@ -735,3 +738,5 @@ sub _sh_single_quote {
 # }
 
 1;
+
+=cut

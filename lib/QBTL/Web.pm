@@ -259,10 +259,30 @@ sub app {
       my $m = $c->req->method                // '';
       my $p = $c->req->url->path->to_string  // '';
       my $q = $c->req->url->query->to_string // '';
-      $c->app->log->debug(   basename( __FILE__ ) . ":"
-                           . __LINE__
-                           . " REQ $m $p"
-                           . ( length( $q ) ? "?$q" : "" ) );
+
+      # --- throttle noisy polling endpoints ---
+      my $log_req = 1;
+
+      if ( $p eq '/localcache/rebuild_status' ) {
+        my $st   = $c->app->defaults->{localcache_rebuild} ||= {};
+        my $now  = time;
+        my $last = $st->{reqlog_ts} || 0;
+
+        # log at most once per minute
+        if ( ( $now - $last ) < 60 ) {
+          $log_req = 0;
+        }
+        else {
+          $st->{reqlog_ts} = $now;
+        }
+      }
+
+      if ( $log_req ) {
+        $c->app->log->debug(   basename( __FILE__ ) . ":"
+                             . __LINE__
+                             . " REQ $m $p"
+                             . ( length( $q ) ? "?$q" : "" ) );
+      }
       my $root = $c->app->defaults->{root_dir} || '.';
 
       my $bin  = QBTL::LocalCache::cache_path_bin( root_dir => $root );
@@ -308,7 +328,16 @@ sub app {
                                        opts_local => {torrent_dir => "/"}, );
       $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
       $c->stash( local_cache_mtime => ( $mtime || 0 ) );
-      $c->stash( local_cache_src   => ( $src   || '' ) );
+
+      # --- Make rebuild token available for navbar form on ALL pages ---
+      my $tok = $c->session( 'rebuild_tok' ) // '';
+      if ( !length $tok ) {
+        $tok = md5_sum( join '|', time, $$, rand(),
+                        ( $c->tx->remote_address // '' ) );
+        $c->session( rebuild_tok => $tok );
+      }
+      $c->stash( rebuild_tok     => $tok );
+      $c->stash( local_cache_src => ( $src || '' ) );
 
       my $local_count = scalar( keys %$local_by_ih );
 

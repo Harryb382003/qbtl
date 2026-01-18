@@ -56,56 +56,85 @@ sub _api_post_form {
       my $e = "$@";
       chomp $e;
 
-      # TRIAGE (best-effort, never die from triage itself)
-      if ( my $app = $self->{app} ) {
-        eval {
-          my $ih = '';
-
-        # best-effort: some endpoints use 'hashes' (pipe-separated), some 'hash'
-          if ( exists $form_href->{hash} ) {
-            $ih = $form_href->{hash} // '';
-          }
-          elsif ( exists $form_href->{hashes} ) {
-            $ih = $form_href->{hashes} // '';
-          }
-
-          QBTL::Classify::classify_triage(
-                                           $app,
-                                           {
-                                            ih   => $ih,
-                                            key  => 'qbt_post_form',
-                                            path => $path,
-                                            err  => $e,
-                                           },
-                                           'http_message_bytes', );
-          1;
-        };
-      }
+      $self->_triage_http(
+                           why       => 'http_die',
+                           path      => $path,
+                           form_href => $form_href,
+                           attempt   => $attempt,
+                           err       => $e, );
 
       return
-          $self->_fail(
-                        "POST failed: $path: "
-                            . ( $res ? $res->status_line : '(no response)' ),
-                        {
-                         path => $path,
-                         ih   => (
-                                $form_href->{hash} // $form_href->{hashes} // ''
-                         ),
-                         ok   => 0,
-                         code => ( $res ? ( $res->code // 0 ) : 0 ),
-                         body => (
-                                   $res ? ( $res->decoded_content // '' ) : ''
-                         ),
-                        } );
+          $self->_fail( "POST died: $path: $e",
+                        {ok => 0, code => 0, body => ''} );
     }
 
+=pod
+
+#     unless ( $ok ) {
+#       my $e = "$@";
+#       chomp $e;
+#
+#       # TRIAGE (best-effort, never die from triage itself)
+#       if ( my $app = $self->{app} ) {
+#         eval {
+#           my $ih = '';
+#
+#         # best-effort: some endpoints use 'hashes' (pipe-separated), some 'hash'
+#           if ( exists $form_href->{hash} ) {
+#             $ih = $form_href->{hash} // '';
+#           }
+#           elsif ( exists $form_href->{hashes} ) {
+#             $ih = $form_href->{hashes} // '';
+#           }
+#
+#           QBTL::Classify::classify_triage(
+#                                            $app,
+#                                            {
+#                                             ih   => $ih,
+#                                             key  => 'qbt_post_form',
+#                                             path => $path,
+#                                             err  => $e,
+#                                            },
+#                                            'http_message_bytes', );
+#           1;
+#         };
+#       }
+#
+#       return
+#           $self->_fail(
+#                         "POST failed: $path: "
+#                             . ( $res ? $res->status_line : '(no response)' ),
+#                         {
+#                          path => $path,
+#                          ih   => (
+#                                 $form_href->{hash} // $form_href->{hashes} // ''
+#                          ),
+#                          ok   => 0,
+#                          code => ( $res ? ( $res->code // 0 ) : 0 ),
+#                          body => (
+#                                    $res ? ( $res->decoded_content // '' ) : ''
+#                          ),
+#                         } );
+#     }
+
+=cut
+
     # success
-    if ( $res && $res->is_success ) {
-      return {
-              ok   => 1,
-              code => ( $res->code            // 200 ),
-              body => ( $res->decoded_content // '' ),};
+    unless ( $res || $res->is_success ) {
+      $self->_triage_http(
+                           why       => 'http_fail',
+                           path      => $path,
+                           form_href => $form_href,
+                           attempt   => $attempt,
+                           res       => $res, );
     }
+
+    #     if ( $res && $res->is_success ) {
+    #       return {
+    #               ok   => 1,
+    #               code => ( $res->code            // 200 ),
+    #               body => ( $res->decoded_content // '' ),};
+    #     }
 
     my $code = $res ? ( $res->code // 0 ) : 0;
 
@@ -156,6 +185,98 @@ sub _fail {
           code => ( $extra->{code} // 0 ),
           body => ( $extra->{body} // '' ),
           err  => $msg,};
+}
+
+sub _api_torrents_add__multipart {
+  my ( $self, $torrent_path, $savepath ) = @_;
+
+  unless ( defined $torrent_path && length $torrent_path ) {
+    return $self->_fail( "missing torrent_path" );
+  }
+  unless ( -f $torrent_path ) {
+    return $self->_fail( "torrent not found: $torrent_path" );
+  }
+  my @content = ( torrents => [$torrent_path] );
+
+  if ( defined $savepath && length $savepath ) {
+    push @content, ( savepath => $savepath );
+  }
+
+  my $res = $self->{ua}->post(
+                               "$self->{base_url}/api/v2/torrents/add",
+                               Content_Type => 'form-data',
+                               Content      => \@content, );
+
+  return {
+          ok   => ( $res->is_success ? 1 : 0 ),
+          code => ( $res->code            // 0 ),
+          body => ( $res->decoded_content // '' ),};
+}
+
+sub _triage_http {
+  my ( $self, %arg ) = @_;
+
+  my $app = $self->{app};
+  return 0 unless $app;
+
+  my $path      = $arg{path}      // '';
+  my $form_href = $arg{form_href} // {};
+  my $why       = $arg{why}       // 'http_fail';
+  my $attempt   = $arg{attempt}   // 0;
+
+  my $res = $arg{res};    # may be undef
+  my $err = $arg{err};    # may be undef
+
+  my $ih = '';
+  if ( ref( $form_href ) eq 'HASH' ) {
+    if ( exists $form_href->{hash} ) {
+      $ih = $form_href->{hash} // '';
+    }
+    elsif ( exists $form_href->{hashes} ) {
+      $ih = $form_href->{hashes} // '';
+    }
+  }
+
+  my $code = ( $res ? ( $res->code // 0 )             : 0 );
+  my $stl  = ( $res ? $res->status_line               : '' );
+  my $body = ( $res ? ( $res->decoded_content // '' ) : '' );
+
+  # don’t die if classify_triage hiccups
+  eval {
+    QBTL::Classify::classify_triage(
+                                     $app,
+                                     {
+                                      ih          => $ih,
+                                      key         => 'qbt_post_form',
+                                      path        => $path,
+                                      attempt     => $attempt,
+                                      http_code   => $code,
+                                      status_line => $stl,
+                                      err  => ( defined $err ? $err : '' ),
+                                      body => $body,
+                                     },
+                                     $why, );
+    1;
+  };
+
+  return 1;
+}
+
+sub _validate_hash {
+  my ( undef, $hash ) = @_;
+  die "bad hash" unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
+  return 1;
+}
+
+sub _validate_hashes_pipe {
+  my ( undef, $hashes ) = @_;
+  die "bad hashes" unless defined $hashes && length $hashes;
+
+  my $h = $hashes;
+  $h =~ s/\s+//g;
+
+  die "bad hashes" unless $h =~ /^[0-9a-f]{40}(?:\|[0-9a-f]{40})*$/;
+  return $h;
 }
 
 # ------------------------------
@@ -455,8 +576,8 @@ sub api_torrents_resume {
 }
 
 sub api_torrents_renameFolder {
-  my ( $self, $hash, $oldPath, $newPath ) = @_;
-  $self->_validate_hash( $hash );
+  my ( $self, $ih, $oldPath, $newPath ) = @_;
+  $self->_validate_hash( $ih );
 
   die "missing oldPath" unless defined $oldPath && length $oldPath;
   die "missing newPath" unless defined $newPath && length $newPath;
@@ -464,14 +585,14 @@ sub api_torrents_renameFolder {
   my $out = $self->_api_post_form(
                                    '/api/v2/torrents/renameFolder',
                                    {
-                                    hash    => $hash,
+                                    hash    => $ih,
                                     oldPath => $oldPath,
                                     newPath => $newPath
                                    }, );
 
   return $out unless $out->{ok};
 
-  my $files = eval { $self->api_torrents_files( $hash ) };
+  my $files = eval { $self->api_torrents_files( $ih ) };
   if ( $@ || ref $files ne 'ARRAY' ) {
     return
         $self->_fail(
@@ -548,49 +669,6 @@ sub api_torrents_stop {
   }
 
   return $self->_api_post_form( '/api/v2/torrents/stop', {hashes => $h} );
-}
-
-sub _validate_hash {
-  my ( undef, $hash ) = @_;
-  die "bad hash" unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
-  return 1;
-}
-
-sub _validate_hashes_pipe {
-  my ( undef, $hashes ) = @_;
-  die "bad hashes" unless defined $hashes && length $hashes;
-
-  my $h = $hashes;
-  $h =~ s/\s+//g;
-
-  die "bad hashes" unless $h =~ /^[0-9a-f]{40}(?:\|[0-9a-f]{40})*$/;
-  return $h;
-}
-
-sub _api_torrents_add__multipart {
-  my ( $self, $torrent_path, $savepath ) = @_;
-
-  unless ( defined $torrent_path && length $torrent_path ) {
-    return $self->_fail( "missing torrent_path" );
-  }
-  unless ( -f $torrent_path ) {
-    return $self->_fail( "torrent not found: $torrent_path" );
-  }
-  my @content = ( torrents => [$torrent_path] );
-
-  if ( defined $savepath && length $savepath ) {
-    push @content, ( savepath => $savepath );
-  }
-
-  my $res = $self->{ua}->post(
-                               "$self->{base_url}/api/v2/torrents/add",
-                               Content_Type => 'form-data',
-                               Content      => \@content, );
-
-  return {
-          ok   => ( $res->is_success ? 1 : 0 ),
-          code => ( $res->code            // 0 ),
-          body => ( $res->decoded_content // '' ),};
 }
 
 1;
