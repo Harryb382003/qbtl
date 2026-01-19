@@ -13,293 +13,24 @@ use URI::Escape qw(uri_escape uri_escape_utf8);
 use QBTL::Logger;
 
 # ------------------------------
-# HELPERS
-# ------------------------------
-
-sub _api_post_form {
-  my ( $self, $path, $form_href ) = @_;
-  die "missing path" unless defined $path && length $path;
-
-  $form_href ||= {};
-  die "form must be HASH" if ref( $form_href ) && ref( $form_href ) ne 'HASH';
-
-  my $url = "$self->{base_url}$path";
-
-  for my $attempt ( 1 .. 2 ) {
-    my $res;
-    my $ok = eval {
-
-      # Force deterministic x-www-form-urlencoded encoding
-      my $u = URI->new( $url );
-      $u->query_form( %$form_href );
-
-      my $req = HTTP::Request->new( POST => $u->as_string );
-      $req->header( 'Content-Type' => 'application/x-www-form-urlencoded' );
-
-      # move params from URL into body (what qBt expects)
-      my $body = $u->query // '';
-      $u->query( undef );
-      $req->uri( $u );
-      $req->content( $body );
-
-      if ( $self->{debug_http} ) {
-        warn "[QBTL::QBT] POST $path\n";
-        warn "[QBTL::QBT] url=" . $u->as_string . "\n";
-        warn "[QBTL::QBT] body=$body\n";
-      }
-
-      $res = $self->{ua}->request( $req );
-      1;
-    };
-
-    unless ( $ok ) {
-      my $e = "$@";
-      chomp $e;
-
-      $self->_triage_http(
-                           why       => 'http_die',
-                           path      => $path,
-                           form_href => $form_href,
-                           attempt   => $attempt,
-                           err       => $e, );
-
-      return
-          $self->_fail( "POST died: $path: $e",
-                        {ok => 0, code => 0, body => ''} );
-    }
-
-=pod
-
-#     unless ( $ok ) {
-#       my $e = "$@";
-#       chomp $e;
-#
-#       # TRIAGE (best-effort, never die from triage itself)
-#       if ( my $app = $self->{app} ) {
-#         eval {
-#           my $ih = '';
-#
-#         # best-effort: some endpoints use 'hashes' (pipe-separated), some 'hash'
-#           if ( exists $form_href->{hash} ) {
-#             $ih = $form_href->{hash} // '';
-#           }
-#           elsif ( exists $form_href->{hashes} ) {
-#             $ih = $form_href->{hashes} // '';
-#           }
-#
-#           QBTL::Classify::classify_triage(
-#                                            $app,
-#                                            {
-#                                             ih   => $ih,
-#                                             key  => 'qbt_post_form',
-#                                             path => $path,
-#                                             err  => $e,
-#                                            },
-#                                            'http_message_bytes', );
-#           1;
-#         };
-#       }
-#
-#       return
-#           $self->_fail(
-#                         "POST failed: $path: "
-#                             . ( $res ? $res->status_line : '(no response)' ),
-#                         {
-#                          path => $path,
-#                          ih   => (
-#                                 $form_href->{hash} // $form_href->{hashes} // ''
-#                          ),
-#                          ok   => 0,
-#                          code => ( $res ? ( $res->code // 0 ) : 0 ),
-#                          body => (
-#                                    $res ? ( $res->decoded_content // '' ) : ''
-#                          ),
-#                         } );
-#     }
-
-=cut
-
-    # success
-    unless ( $res || $res->is_success ) {
-      $self->_triage_http(
-                           why       => 'http_fail',
-                           path      => $path,
-                           form_href => $form_href,
-                           attempt   => $attempt,
-                           res       => $res, );
-    }
-
-    #     if ( $res && $res->is_success ) {
-    #       return {
-    #               ok   => 1,
-    #               code => ( $res->code            // 200 ),
-    #               body => ( $res->decoded_content // '' ),};
-    #     }
-
-    my $code = $res ? ( $res->code // 0 ) : 0;
-
-    # auth/session died -> login then retry once
-    if ( ( $code == 401 || $code == 403 ) && $attempt == 1 ) {
-      my $login = eval { $self->api_qbt_login() };
-      next if !$@ && ref( $login ) eq 'HASH' && $login->{ok};
-    }
-
-    return
-        $self->_fail(
-                      "POST failed: $path: "
-                          . ( $res ? $res->status_line : '(no response)' ),
-                      {
-                       ok   => 0,
-                       code => ( $res ? ( $res->code // 0 ) : 0 ),
-                       body => (
-                                 $res ? ( $res->decoded_content // '' ) : ''
-                       ),
-                      } );
-  }
-}
-
-sub _fail {
-  my ( $self, $msg, $extra ) = @_;
-  $extra ||= {};
-
-  # TRIAGE (best-effort; never die from triage)
-  if ( my $app = $self->{app} ) {
-    eval {
-      QBTL::Classify::classify_triage(
-                                       $app,
-                                       {
-                                        ih   => ( $extra->{ih} // '' ),
-                                        key  => 'qbt_fail',
-                                        path => ( $extra->{path} // '' ),
-                                        err  => $msg,
-                                        code => ( $extra->{code} // 0 ),
-                                        body => ( $extra->{body} // '' ),
-                                       },
-                                       'qbt_fail', );
-      1;
-    };
-  }
-
-  return {
-          ok   => 0,
-          code => ( $extra->{code} // 0 ),
-          body => ( $extra->{body} // '' ),
-          err  => $msg,};
-}
-
-sub _api_torrents_add__multipart {
-  my ( $self, $torrent_path, $savepath ) = @_;
-
-  unless ( defined $torrent_path && length $torrent_path ) {
-    return $self->_fail( "missing torrent_path" );
-  }
-  unless ( -f $torrent_path ) {
-    return $self->_fail( "torrent not found: $torrent_path" );
-  }
-  my @content = ( torrents => [$torrent_path] );
-
-  if ( defined $savepath && length $savepath ) {
-    push @content, ( savepath => $savepath );
-  }
-
-  my $res = $self->{ua}->post(
-                               "$self->{base_url}/api/v2/torrents/add",
-                               Content_Type => 'form-data',
-                               Content      => \@content, );
-
-  return {
-          ok   => ( $res->is_success ? 1 : 0 ),
-          code => ( $res->code            // 0 ),
-          body => ( $res->decoded_content // '' ),};
-}
-
-sub _triage_http {
-  my ( $self, %arg ) = @_;
-
-  my $app = $self->{app};
-  return 0 unless $app;
-
-  my $path      = $arg{path}      // '';
-  my $form_href = $arg{form_href} // {};
-  my $why       = $arg{why}       // 'http_fail';
-  my $attempt   = $arg{attempt}   // 0;
-
-  my $res = $arg{res};    # may be undef
-  my $err = $arg{err};    # may be undef
-
-  my $ih = '';
-  if ( ref( $form_href ) eq 'HASH' ) {
-    if ( exists $form_href->{hash} ) {
-      $ih = $form_href->{hash} // '';
-    }
-    elsif ( exists $form_href->{hashes} ) {
-      $ih = $form_href->{hashes} // '';
-    }
-  }
-
-  my $code = ( $res ? ( $res->code // 0 )             : 0 );
-  my $stl  = ( $res ? $res->status_line               : '' );
-  my $body = ( $res ? ( $res->decoded_content // '' ) : '' );
-
-  # don’t die if classify_triage hiccups
-  eval {
-    QBTL::Classify::classify_triage(
-                                     $app,
-                                     {
-                                      ih          => $ih,
-                                      key         => 'qbt_post_form',
-                                      path        => $path,
-                                      attempt     => $attempt,
-                                      http_code   => $code,
-                                      status_line => $stl,
-                                      err  => ( defined $err ? $err : '' ),
-                                      body => $body,
-                                     },
-                                     $why, );
-    1;
-  };
-
-  return 1;
-}
-
-sub _validate_hash {
-  my ( undef, $hash ) = @_;
-  die "bad hash" unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
-  return 1;
-}
-
-sub _validate_hashes_pipe {
-  my ( undef, $hashes ) = @_;
-  die "bad hashes" unless defined $hashes && length $hashes;
-
-  my $h = $hashes;
-  $h =~ s/\s+//g;
-
-  die "bad hashes" unless $h =~ /^[0-9a-f]{40}(?:\|[0-9a-f]{40})*$/;
-  return $h;
-}
-
-# ------------------------------
 # Constructor / Auth
 # {base_url}/api/v2/auth/
 # ------------------------------
 
 sub new {
+
   my ( $class, $opts ) = @_;
   $opts ||= {};
 
-  my $self = {%$opts};
+  my $self = {
+              base_url     => $opts->{base_url}     || 'http://localhost:8080',
+              username     => $opts->{username}     || 'admin',
+              password     => $opts->{password}     || 'adminadmin',
+              die_on_error => $opts->{die_on_error} || 0,
+              ua => LWP::UserAgent->new( cookie_jar => HTTP::Cookies->new ),
+              %$opts,};
 
-  $self->{base_url}     ||= 'http://localhost:8080';
-  $self->{username}     ||= 'admin';
-  $self->{password}     ||= 'adminadmin';
-  $self->{die_on_error} ||= 0;
-
-  $self->{ua} ||= LWP::UserAgent->new( cookie_jar => HTTP::Cookies->new );
-  warn "[QBTL::QBT] new app_id="
-      . ( defined( $self->{app} ) ? ( 0 + $self->{app} ) : 'undef' ) . "\n";
   bless $self, $class;
-  return $self;
 }
 
 sub api_qbt_login {
@@ -366,8 +97,10 @@ sub api_app_preferences {
 # ------------------------------
 
 sub api_torrents_delete {
-  my ( $self, $hashes, $deleteFiles ) = @_;
-  die "missing hashes" unless defined $hashes && length $hashes;
+  my ( $self, $ih, $deleteFiles ) = @_;
+  die "missing hashes" unless defined && length;
+
+  $self->_validate_hashes_pipe( $ih );
 
   # qBt accepts "true/false", be we're not taking the chance.
   $deleteFiles = 'false';
@@ -376,7 +109,7 @@ sub api_torrents_delete {
       $self->_api_post_form(
                              '/api/v2/torrents/delete',
                              {
-                              hashes      => $hashes,
+                              hashes      => $ih,
                               deleteFiles => $deleteFiles,
                              } );
 }
@@ -419,23 +152,23 @@ sub api_torrents_info {
 }
 
 sub api_torrents_info_one {
-  my ( $self, $hash ) = @_;
+  my ( $self, $ih ) = @_;
   unless ( ref( $self ) && ref( $self ) eq __PACKAGE__ ) {
     die "api_torrents_info_one called without object";
   }
-  $self->_validate_hash( $hash );
+  $self->_validate_hash( $ih );
 
-  my $arr = $self->api_torrents_info( hashes => $hash );
+  my $arr = $self->api_torrents_info( hashes => $ih );
   return {} unless ref $arr eq 'ARRAY' && @$arr && ref $arr->[0] eq 'HASH';
 
   return $arr->[0];
 }
 
 sub api_torrents_files {
-  my ( $self, $hash ) = @_;
-  $self->_validate_hash( $hash );
+  my ( $self, $ih ) = @_;
+  $self->_validate_hash( $ih );
 
-  my $url = "$self->{base_url}/api/v2/torrents/files?hash=$hash";
+  my $url = "$self->{base_url}/api/v2/torrents/files?hash=$ih";
 
   for my $attempt ( 1 .. 2 ) {
     my $res = $self->{ua}->get( $url );
@@ -487,6 +220,16 @@ sub api_torrents_files {
   }
 }
 
+# sub api_torrents_files {
+#   my ( $self, $hash ) = @_;
+#   $self->_validate_hash( $hash );
+#
+#   my $out = $self->_api_get_json( "/api/v2/torrents/files?hash=$hash" );
+#   return $out unless $out->{ok};
+#
+#   return $out->{json};    # arrayref of file hashes
+# }
+
 sub api_torrents_infohash_map {
   my ( $self ) = @_;
 
@@ -498,10 +241,10 @@ sub api_torrents_infohash_map {
   for my $t ( @$list ) {
     next if ref $t ne 'HASH';
 
-    my $h = $t->{hash} // '';
-    next unless $h =~ /^[0-9a-f]{40}$/;
+    my $ih = $t->{hash} // '';
+    next unless $ih =~ /^[0-9a-f]{40}$/;
 
-    $by_ih{$h} = $t;
+    $by_ih{$ih} = $t;
   }
 
   return \%by_ih;
@@ -530,49 +273,48 @@ sub api_torrents_add {
 }
 
 sub api_torrents_recheck {
-  my ( $self, $hash ) = @_;
-  $self->_validate_hash( $hash );
+  my ( $self, $ih ) = @_;
+  $self->_validate_hash( $ih );
 
-  return $self->_api_post_form( '/api/v2/torrents/recheck',
-                                {hashes => $hash}, );
+  return $self->_api_post_form( '/api/v2/torrents/recheck', {hashes => $ih}, );
 }
 
 sub api_torrents_setLocation {
-  my ( $self, $hash, $location ) = @_;
-  $self->_validate_hash( $hash );
+  my ( $self, $ih, $location ) = @_;
+  $self->_validate_hash( $ih );
   die "missing location" unless defined $location && length $location;
 
   return
       $self->_api_post_form( '/api/v2/torrents/setLocation',
-                             {hashes => $hash, location => $location}, );
+                             {hashes => $ih, location => $location}, );
 }
 
 sub api_torrents_setDownloadPath {
-  my ( $self, $hash, $downloadPath ) = @_;
-  $self->_validate_hash( $hash );
+  my ( $self, $ih, $downloadPath ) = @_;
+  $self->_validate_hash( $ih );
   die "missing downloadPath"
       unless defined $downloadPath && length $downloadPath;
   return
       $self->_api_post_form(
                              '/api/v2/torrents/setDownloadPath',
                              {
-                              hashes       => $hash,
+                              hashes       => $ih,
                               downloadPath => $downloadPath
                              }, );
 }
 
 sub api_torrents_pause {
-  my ( $self, $hash ) = @_;
-  $self->_validate_hash( $hash );
+  my ( $self, $ih ) = @_;
+  $self->_validate_hash( $ih );
 
-  return $self->_api_post_form( '/api/v2/torrents/pause', {hashes => $hash}, );
+  return $self->_api_post_form( '/api/v2/torrents/pause', {hashes => $ih}, );
 }
 
 sub api_torrents_resume {
-  my ( $self, $hash ) = @_;
-  $self->_validate_hash( $hash );
+  my ( $self, $ih ) = @_;
+  $self->_validate_hash( $ih );
 
-  return $self->_api_post_form( '/api/v2/torrents/resume', {hashes => $hash}, );
+  return $self->_api_post_form( '/api/v2/torrents/resume', {hashes => $ih}, );
 }
 
 sub api_torrents_renameFolder {
@@ -624,8 +366,8 @@ sub api_torrents_renameFolder {
 }
 
 sub api_torrents_renameFile {
-  my ( $self, $hash, $oldPath, $newPath ) = @_;
-  $self->_validate_hash( $hash );
+  my ( $self, $ih, $oldPath, $newPath ) = @_;
+  $self->_validate_hash( $ih );
 
   die "missing oldPath" unless defined $oldPath && length $oldPath;
   die "missing newPath" unless defined $newPath && length $newPath;
@@ -634,88 +376,152 @@ sub api_torrents_renameFile {
       $self->_api_post_form(
                              '/api/v2/torrents/renameFile',
                              {
-                              hash    => $hash,
+                              hash    => $ih,
                               oldPath => $oldPath,
                               newPath => $newPath
                              }, );
 }
 
 sub api_torrents_stop {
-  my ( $self, $hashes ) = @_;
+  my ( $self, $ih, $stopFiles ) = @_;
+  die "missing hashes" unless defined( $ih ) && length( $ih );
 
-  # Accept: scalar ih, arrayref of ih, or "all"
-  my $h = '';
+  $self->_validate_hashes_pipe( $ih );
 
-  if ( !defined $hashes ) {
+  # qBt accepts "true/false", be we're not taking the chance.
+  $stopFiles = 'false';
+
+  return
+      $self->_api_post_form(
+                             '/api/v2/torrents/stop',
+                             {
+                              hashes    => $ih,
+                              stopFiles => $stopFiles,
+                             } );
+}
+
+# ------------------------------
+# HELPERS
+# ------------------------------
+
+sub _api_post_form {
+  my ( $self, $path, $form_href ) = @_;
+  die "missing path" unless defined $path && length $path;
+
+  $form_href ||= {};
+  die "form must be HASH" if ref( $form_href ) && ref( $form_href ) ne 'HASH';
+
+  my $url = "$self->{base_url}$path";
+
+  for my $attempt ( 1 .. 2 ) {
+
+    # Force deterministic x-www-form-urlencoded encoding
+    my $u = URI->new( $url );
+    $u->query_form( %$form_href );
+
+    my $req = HTTP::Request->new( POST => $u->as_string );
+    $req->header( 'Content-Type' => 'application/x-www-form-urlencoded' );
+
+    # move params from URL into body (what qBt expects)
+    my $body = $u->query // '';
+    $u->query( undef );
+    $req->uri( $u );
+    $req->content( $body );
+
+    if ( $self->{debug_http} ) {
+      warn "[QBTL::QBT] POST $path\n";
+      warn "[QBTL::QBT] url=" . $u->as_string . "\n";
+      warn "[QBTL::QBT] body=$body\n";
+    }
+
+    my $res = $self->{ua}->request( $req );
+
+    # success
+    if ( $res->is_success ) {
+      return {
+              ok   => 1,
+              code => ( $res->code            // 200 ),
+              body => ( $res->decoded_content // '' ),};
+    }
+
+    my $code = $res->code // 0;
+
+    # auth/session died -> login then retry once
+    if ( ( $code == 401 || $code == 403 ) && $attempt == 1 ) {
+      my $login = eval { $self->api_qbt_login() };
+      next if !$@ && ref( $login ) eq 'HASH' && $login->{ok};
+
+      # login failed -> fall through to failure below
+    }
+
     return
-        $self->_fail( "stop: missing hashes",
-                      {ok => 0, code => 0, body => "missing hashes"} );
+        $self->_fail(
+                      "POST failed: $path: " . $res->status_line,
+                      {
+                       ok   => 0,
+                       code => ( $res->code            // 0 ),
+                       body => ( $res->decoded_content // '' ),
+                      } );
   }
-  elsif ( ref( $hashes ) eq 'ARRAY' ) {
-    my @hh = grep { defined( $_ ) && length( $_ ) } @$hashes;
-    $h = join( '|', @hh );
-  }
-  else {
-    $h = "$hashes";
-  }
+}
 
+sub _validate_hash {
+  my ( undef, $ih ) = @_;
+  die "bad hash" unless defined $ih && $ih =~ /^[0-9a-f]{40}$/;
+  return 1;
+}
+
+sub _validate_hashes_pipe {
+  my ( undef, $ih ) = @_;
+  die "bad hashes" unless defined $ih && length $ih;
+
+  my $h = $ih;
   $h =~ s/\s+//g;
 
-# qBittorrent supports "all", otherwise require one-or-more 40-hex separated by |
-  if ( $h ne 'all' && $h !~ /\A[0-9a-f]{40}(?:\|[0-9a-f]{40})*\z/i ) {
-    return
-        $self->_fail( "stop: bad hashes: [$h]",
-                      {ok => 0, code => 0, body => "bad hashes: [$h]"} );
+  die "bad hashes" unless $h =~ /^[0-9a-f]{40}(?:\|[0-9a-f]{40})*$/;
+  return $h;
+}
+
+sub _fail {
+  my ( $self, $msg, $out ) = @_;
+  $out ||= {ok => 0};
+
+  $out->{ok}  = 0    unless defined $out->{ok};
+  $out->{err} = $msg unless defined $out->{err} && length $out->{err};
+
+  die $msg if $self->{die_on_error};
+  return $out;
+}
+
+sub _api_torrents_add__multipart {
+  my ( $self, $torrent_path, $savepath ) = @_;
+
+  unless ( defined $torrent_path && length $torrent_path ) {
+    return $self->_fail( "missing torrent_path" );
+  }
+  unless ( -f $torrent_path ) {
+    return $self->_fail( "torrent not found: $torrent_path" );
+  }
+  my @content = ( torrents => [$torrent_path] );
+
+  if ( defined $savepath && length $savepath ) {
+    push @content, ( savepath => $savepath );
   }
 
-  return $self->_api_post_form( '/api/v2/torrents/stop', {hashes => $h} );
+  my $res = $self->{ua}->post(
+                               "$self->{base_url}/api/v2/torrents/add",
+                               Content_Type => 'form-data',
+                               Content      => \@content, );
+
+  return {
+          ok   => ( $res->is_success ? 1 : 0 ),
+          code => ( $res->code            // 0 ),
+          body => ( $res->decoded_content // '' ),};
 }
 
 1;
 
-# sub _api_post_form {
-#   my ( $self, $path, $form_href ) = @_;
-#   die "missing path" unless defined $path && length $path;
-#
-#   $form_href ||= {};
-#   die "form must be HASH" if ref( $form_href ) && ref( $form_href ) ne 'HASH';
-#
-#   my $url = "$self->{base_url}$path";
-#
-#   # Force deterministic x-www-form-urlencoded encoding
-#   my $u = URI->new( $url );
-#   $u->query_form( %$form_href );
-#
-#   my $req = HTTP::Request->new( POST => $u->as_string );
-#   $req->header( 'Content-Type' => 'application/x-www-form-urlencoded' );
-#
-# # NOTE: query_form put params in URL; move them into the body (what qBt expects)
-#   my $body = $u->query // '';
-#   $u->query( undef );
-#   $req->uri( $u );
-#   $req->content( $body );
-#
-#   # Optional exact payload debug
-#   if ( $self->{debug_http} ) {
-#     warn "[QBTL::QBT] POST $path\n";
-#     warn "[QBTL::QBT] url=" . $u->as_string . "\n";
-#     warn "[QBTL::QBT] body=$body\n";
-#   }
-#
-#   my $res = $self->{ua}->request( $req );
-#
-#   return
-#       $self->_fail(
-#                     "POST failed: $path: " . $res->status_line,
-#                     {
-#                      ok   => 0,
-#                      code => ( $res->code            // 0 ),
-#                      body => ( $res->decoded_content // '' ),
-#                     }
-#       ) unless $res->is_success;
-#
-#   return {
-#           ok   => 1,
-#           code => ( $res->code            // 200 ),
-#           body => ( $res->decoded_content // '' ),};
-# }
+=pod
+
+
+=cut

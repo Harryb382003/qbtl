@@ -27,16 +27,31 @@
       <th>Error</th>
     </tr>
 
-    % for my $r (@$rows) {
-      <tr>
-        <td class="small"><%= $r->{id} // '' %></td>
-        <td class="small"><%= $r->{ts} ? scalar localtime($r->{ts}) : '' %></td>
-        <td><%= $r->{why} // '' %></td>
-        <td class="small"><%= $r->{ih} // '' %></td>
-        <td><%= $r->{key} // '' %></td>
-        <td class="path"><%= $r->{path} // '' %></td>
-        <td><pre class="err"><%= $r->{err} // '' %></pre></td>
-      </tr>
-    % }
-  </table>
+   % for my $r (@$rows) {
+  % my $ih = $r->{ih} // '';
+  % $ih = $r->{id} if (!length($ih) && ($r->{id} // '') =~ /^[0-9a-f]{40}$/);
+
+  <tr>
+    <td><%= $r->{id} // '' %></td>
+    <td><%= $r->{ts} ? scalar localtime($r->{ts}) : '' %></td>
+    <td><%= $r->{why} // '' %></td>
+    <td><code><%= $r->{ih} // '' %></code></td>
+    <td><%= $r->{key} // '' %></td>
+    <td><%= $r->{path} // '' %></td>
+    <td><pre><%= $r->{err} // '' %></pre></td>
+
+    <td>
+      <form method="post" action="/class/zero_bytes" style="display:inline; margin:0;">
+        <input type="hidden" name="ih" value="<%= $ih %>">
+        <button type="submit">Class: Zero Bytes</button>
+      </form>
+
+      <form method="post" action="/class/qbt_default_path" style="display:inline; margin:0;">
+        <input type="hidden" name="ih" value="<%= $ih %>">
+        <button type="submit">Class: QBT Default Path</button>
+      </form>
+    </td>
+  </tr>
 % }
+% }
+  </table>

@@ -47,42 +47,104 @@ sub classify_no_hits {
 
 sub classify_triage {
   my ( $app, $rec, $why, %opt ) = @_;
-  $app->log->debug(
-                  prefix_dbg() . " classify_triage app_id=" . refaddr( $app ) );
   return 0 unless $app && ref( $rec ) eq 'HASH';
 
-  my $ih = $rec->{ih} // '';
-  if ( length( $ih ) && $ih !~ /^[0-9a-f]{40}$/ ) {
+  my $ih     = $rec->{ih} // '';
+  my $has_ih = ( defined( $ih ) && $ih =~ /^[0-9a-f]{40}$/ ) ? 1 : 0;
 
-    # do not munge; if caller hands us junk, we refuse to store under a fake key
-    $ih = '';
+  # Hard rule: triage is keyed by ih. If missing -> caller bug bucket.
+  if ( !$has_ih ) {
+    _ensure_class_bucket( $app, 'TRIAGE_BUG' );
+
+    my $id = join '-', time, $$, int( rand( 1_000_000 ) );
+
+    $app->defaults->{classes}{TRIAGE_BUG}{$id} = {
+                                                  %$rec,
+                                                  ts  => time,
+                                                  why => ( $why // 'triage' ),
+                                                  bug => 'missing_ih',};
+
+    $app->log->error(   prefix_dbg()
+                      . " TRIAGE_BUG missing ih (caller lost key) id=$id why=["
+                      . ( $why // '' )
+                      . "] key=["
+                      . ( $rec->{key} // '' ) . "]"
+                      . " path=["
+                      . ( $rec->{path} // '' )
+                      . "]" );
+
+    return 0;    # make it loud: caller can see it didn't "triage" properly
   }
 
   _ensure_class_bucket( $app, 'TRIAGE' );
 
-  # TRIAGE record id:
-  # - if ih exists, key directly by ih (stable, easy lookup)
-  # - else, key by a generated per-run id (still visible in /qbt/triage)
-  my $id = length( $ih ) ? $ih : _triage_id();
+  my $id = $ih;
 
   $app->defaults->{classes}{TRIAGE}{$id} = {
                                             %$rec,
                                             ts  => time,
                                             why => ( $why // 'triage' ),};
 
-  # Don’t spin: only mark “processed” when we have a real ih.
-  if ( length( $ih ) ) {
-    _mark_processed(
-                     $app, $ih,
-                     status => ( $opt{status} // 'triage' ),
-                     why    => ( $why         // 'triage' ), );
-  }
+  _mark_processed(
+                   $app, $ih,
+                   status => ( $opt{status} // 'triage' ),
+                   why    => ( $why         // 'triage' ), );
+
   $app->log->debug(   prefix_dbg()
-                    . " TRIAGE add id=$id ih=["
-                    . ( $rec->{ih} // '' )
-                    . "] why=["
+                    . " TRIAGE add ih="
+                    . short_ih( $ih )
+                    . " why=["
                     . ( $why // '' )
                     . "]" );
+
+  return 1;
+}
+
+sub classify_zero_bytes {
+  my ( $app, $rec, $why ) = @_;
+  return 0 unless $app && ref( $rec ) eq 'HASH';
+
+  my $ih = $rec->{ih} // '';
+  return 0 unless $ih =~ /^[0-9a-f]{40}$/;
+
+  _ensure_class_bucket( $app, 'ZERO_BYTES' );
+
+  $app->defaults->{classes}{ZERO_BYTES}{$ih} = {
+                                                %$rec,
+                                                ts  => time,
+                                                why => ( $why // 'zero_bytes' ),
+  };
+
+  # optional: treat as processed so it vanishes from Page_View this run
+  _mark_processed(
+                   $app, $ih,
+                   status => 'zero_bytes',
+                   why    => ( $why // 'zero_bytes' ) );
+
+  return 1;
+}
+
+sub classify_qbt_default_path {
+  my ( $app, $rec, $why ) = @_;
+  return 0 unless $app && ref( $rec ) eq 'HASH';
+
+  my $ih = $rec->{ih} // '';
+  return 0 unless $ih =~ /^[0-9a-f]{40}$/;
+
+  _ensure_class_bucket( $app, 'QBT_DEFAULT_PATH' );
+
+  $app->defaults->{classes}{QBT_DEFAULT_PATH}{$ih} = {
+                                          %$rec,
+                                          ts  => time,
+                                          why => ( $why // 'qbt_default_path' ),
+  };
+
+  # optional: treat as processed so it vanishes from Page_View this run
+  _mark_processed(
+                   $app, $ih,
+                   status => 'qbt_default_path',
+                   why    => ( $why // 'qbt_default_path' ) );
+
   return 1;
 }
 

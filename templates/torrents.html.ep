@@ -16,7 +16,7 @@
 <form method="get" action="/torrents" style="margin: 0 0 12px 0;">
   <label>
     Search:
-    <input type="text" name="q" value="<%= $q %>" style="min-width: 380px;" placeholder="hash, name, or source_path">
+    <input type="text" name="q" value="<%= $q %>" style="min-width: 380px;" placeholder="ih, name, or source_path">
   </label>
 
   <label style="margin-left: 12px;">
@@ -60,7 +60,7 @@
   <thead>
     <tr>
       <th data-type="text">name</th>
-      <th data-type="text">hash</th>
+      <th data-type="text">ih</th>
       <th data-type="number">total_size</th>
       <th data-type="number">files</th>
       <th data-type="text">source_path</th>
@@ -72,20 +72,24 @@
     % for my $t (@$sample) {
       <tr>
         <td><%= $t->{name} %></td>
-        <td><code><%= $t->{hash} %></code></td>
+        <td><code><%= $t->{ih} %></code></td>
         <td><%= $human ? $human->($t->{total_size}) : ($t->{total_size}||0) %></td>
         <td><%= $t->{files_count} %></td>
         <td><%= $t->{source_path} %></td>
         <td>
           % if (stash('dev_mode')) {
-            <form method="post" action="/qbt/add_one" style="display:inline; margin:0;">
-  <input type="hidden" name="hash" value="<%= $t->{hash} %>">
-  <input type="hidden" name="source_path" value="<%= $t->{source_path} %>">
-  <input type="hidden" name="confirm" value="1">
-  <input type="hidden" name="return_to" value="<%= url_for->to_string %>">
-  <button type="submit">Add</button>
-</form>
-            % } else {
+            <div class="qbtl-actions" style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+              <form method="post" action="/qbt/add_one" style="display:inline; margin:0;">
+                <!-- canonical field name is ih; keep hash too until /qbt/add_one is fully migrated -->
+                <input type="hidden" name="ih" value="<%= $t->{ih} %>">
+                <input type="hidden" name="hash" value="<%= $t->{ih} %>">
+                <input type="hidden" name="source_path" value="<%= $t->{source_path} %>">
+                <input type="hidden" name="confirm" value="1">
+                <input type="hidden" name="return_to" value="<%= url_for->to_string %>">
+                <button type="submit">Add</button>
+              </form>
+            </div>
+          % } else {
             <em>dev</em>
           % }
         </td>
@@ -135,7 +139,6 @@
     let v2 = getCellValue(asc ? b : a, idx);
 
     if (type === 'number') {
-      // try to parse "1.2 GB" etc by grabbing leading number; fallback 0
       const n1 = parseFloat(v1.replace(/[^0-9.]/g, '')) || 0;
       const n2 = parseFloat(v2.replace(/[^0-9.]/g, '')) || 0;
       return n1 - n2;
@@ -147,7 +150,6 @@
   const key = "qbtltorrents_sort";
   const glyph = (asc) => asc ? " ▲" : " ▼";
 
-  // restore sort state
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(key) || "null"); } catch (e) {}
 
@@ -163,7 +165,6 @@
 
     rows.sort(comparer(idx, type, asc)).forEach(tr => tbody.appendChild(tr));
 
-    // reset header labels + glyph
     ths.forEach(h => { h.textContent = h.textContent.replace(/[ ▲▼]+$/, ''); });
     th.textContent = th.textContent.replace(/[ ▲▼]+$/, '') + glyph(asc);
 
@@ -175,7 +176,6 @@
     th.style.cursor = 'pointer';
 
     th.addEventListener('click', () => {
-      // strip any glyph first
       th.textContent = th.textContent.replace(/[ ▲▼]+$/, '');
       applySort(idx, asc);
       asc = !asc;

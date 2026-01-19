@@ -57,28 +57,27 @@
         <span class="nav-notice">Rebuilding local cache…</span>
     % }
     % if (stash('dev_mode')) {
-    % my $notice = stash('notice') // flash('notice');
-    % if ($notice) {
-  <div class="notice"><%= $notice %></div>
+      % my $notice = stash('notice') // flash('notice');
+      % if ($notice) {
+        <div class="notice"><%= $notice %></div>
+      % }
+
+       <form method="post" action="/localcache/rebuild">
+         <input type="hidden" name="tok" value="<%= stash('rebuild_tok') // '' %>">
+         <button class="navbtn navbtn--wide" type="submit">Rebuild Cache<br>
+           <small>Last: <%= $label %></small>
+         </button>
+       </form>
+
+       <form method="post" action="/tasks/poll">
+         <button class="navbtn navbtn--wide" type="submit">Poll recheck → maybe resume</button>
+       </form>
+
+       <form method="post" action="/restart">
+         <button class="navbtn" type="submit">Restart server (dev)</button>
+       </form>
     % }
-
-<form method="post" action="/localcache/rebuild">
-  <input type="hidden" name="tok" value="<%= stash('rebuild_tok') // '' %>">
-  <button class="navbtn navbtn--wide" type="submit">Rebuild Cache<br>
-    <small>Last: <%= $label %></small>
-  </button>
-</form>
-
-      <form method="post" action="/tasks/poll">
-        <button class="navbtn navbtn--wide" type="submit">Poll recheck → maybe resume</button>
-      </form>
-
-
-      <form method="post" action="/restart">
-        <button class="navbtn" type="submit">Restart server (dev)</button>
-      </form>
-    % }
-  </div>
+   </div>
 
   <hr />
 

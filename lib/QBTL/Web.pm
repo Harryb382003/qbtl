@@ -7,6 +7,7 @@ use File::Basename qw(dirname basename);
 use FindBin        qw($Bin);
 use Mojolicious;
 use Mojo::JSON   qw(true);
+use Mojo::Util   qw(md5_sum);
 use Scalar::Util qw(refaddr);
 
 use QBTL::LocalCache;
@@ -66,7 +67,7 @@ sub _add_one_build_queue {
     push @q, $ih;
   }
 
-  # Optional: pseudo-randomize without relying on hash order
+  # Optional: pseudo-randomize without relying on ih order
   @q = sort { rand() <=> rand() } @q;
 
   $st->{queue}       = \@q;
@@ -90,7 +91,7 @@ sub _add_one_mark_fail {
   return;
 }
 
-sub _add_one_remove_hash {
+sub _add_one_remove_ih {
   my ( $app, $ih ) = @_;
   $ih = ( $ih // '' );
   return unless $ih =~ /^[0-9a-f]{40}$/;
@@ -237,7 +238,7 @@ sub app {
   my $app = Mojolicious->new;
   QBTL::Logger::set_log_file( $opts->{log_file} || 'qbtl.log' );
   $app->log->level( 'debug' );
-  $app->log->debug( basename( __FILE__ ) . ":" . __LINE__ . " pid=$$" );
+  $app->log->debug( prefix_dbg() . " pid=$$" );
   $app->defaults->{dev_mode} = ( $opts->{dev_mode} ? 1 : 0 );
 
   my $root = $opts->{root_dir} || '.';
@@ -278,10 +279,8 @@ sub app {
       }
 
       if ( $log_req ) {
-        $c->app->log->debug(   basename( __FILE__ ) . ":"
-                             . __LINE__
-                             . " REQ $m $p"
-                             . ( length( $q ) ? "?$q" : "" ) );
+        $c->app->log->debug(
+                  prefix_dbg() . " REQ $m $p" . ( length( $q ) ? "?$q" : "" ) );
       }
       my $root = $c->app->defaults->{root_dir} || '.';
 
@@ -312,8 +311,7 @@ sub app {
   if ( $opts->{dev_mode} ) {
     require QBTL::Devel;
     QBTL::Devel::register_routes( $app, $opts );    # <-- IMPORTANT
-    $app->log->debug(
-       basename( __FILE__ ) . ":" . __LINE__ . " Developer routes registered" );
+    $app->log->debug( prefix_dbg() . " Developer routes registered" );
   }
 
   $r->get(
@@ -359,16 +357,16 @@ sub app {
 
       my $qbt_loaded_count = scalar( keys %$qbt_by_ih );
 
-      my $name_is_hash = 0;
-      my $repairable   = 0;
+      my $name_is_ih = 0;
+      my $repairable = 0;
 
       for my $t ( @$qbt_list ) {
         next if ref( $t ) ne 'HASH';
         my $name = $t->{name} // '';
         next unless $name =~ /^[0-9a-fA-F]{40}$/;
-        $name_is_hash++;
+        $name_is_ih++;
 
-        my $ih = lc( $t->{hash} // '' );
+        my $ih = lc( $t->{ih} // '' );
         next unless $ih =~ /^[0-9a-f]{40}$/;
         $repairable++ if exists $local_by_ih->{$ih};
       }
@@ -395,7 +393,7 @@ sub app {
 
         push @fails,
             {
-             hash          => $ih,
+             ih            => $ih,
              name          => ( $rec->{name} // '' ),
              stage         => $stage,
              reason        => ( $rt->{reason}     // '' ),
@@ -423,7 +421,7 @@ sub app {
       my %stats = (
                     local_unique     => $local_count,
                     qbt_loaded       => $qbt_loaded_count,
-                    qbt_name_is_hash => $name_is_hash,
+                    qbt_name_is_ih   => $name_is_ih,
                     missing_from_qbt => $missing_from_qbt,
                     repairable       => $repairable,
                     qbt_error        => $qbt_err, );
@@ -478,6 +476,64 @@ sub app {
       $c->render( json => {ok => Mojo::JSON->true} );
     } );
 
+  $r->post(
+    '/class/zero_bytes' => sub {
+      my $c  = shift;
+      my $ih = $c->param( 'ih' ) // '';
+      return $c->render( text => "bad ih", status => 400 )
+          unless $ih =~ /^[0-9a-f]{40}$/;
+
+      my ( $local_by_ih ) =
+          QBTL::LocalCache::get_local_by_ih(
+                                       root_dir => ( $opts->{root_dir} || '.' ),
+                                       opts_local => {torrent_dir => "/"}, );
+      $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
+
+      my $rec = $local_by_ih->{$ih} || {};
+      $rec = {} if ref( $rec ) ne 'HASH';
+
+      QBTL::Classify::classify_zero_bytes(
+                                  $c->app,
+                                  {
+                                   ih          => $ih,
+                                   name        => ( $rec->{name}        // '' ),
+                                   source_path => ( $rec->{source_path} // '' ),
+                                   total_size  => ( $rec->{total_size}  // 0 ),
+                                  },
+                                  'manual_gui_observed' );
+
+      return $c->redirect_to( $c->req->headers->referrer || '/torrents' );
+    } );
+
+  $r->post(
+    '/class/qbt_default_path' => sub {
+      my $c  = shift;
+      my $ih = $c->param( 'ih' ) // '';
+      return $c->render( text => "bad ih", status => 400 )
+          unless $ih =~ /^[0-9a-f]{40}$/;
+
+      my ( $local_by_ih ) =
+          QBTL::LocalCache::get_local_by_ih(
+                                       root_dir => ( $opts->{root_dir} || '.' ),
+                                       opts_local => {torrent_dir => "/"}, );
+      $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
+
+      my $rec = $local_by_ih->{$ih} || {};
+      $rec = {} if ref( $rec ) ne 'HASH';
+
+      QBTL::Classify::classify_qbt_default_path(
+                                  $c->app,
+                                  {
+                                   ih          => $ih,
+                                   name        => ( $rec->{name}        // '' ),
+                                   source_path => ( $rec->{source_path} // '' ),
+                                   total_size  => ( $rec->{total_size}  // 0 ),
+                                  },
+                                  'manual_gui_observed' );
+
+      return $c->redirect_to( $c->req->headers->referrer || '/torrents' );
+    } );
+
   $r->get(
     '/qbt' => sub {
       my $c = shift;
@@ -494,9 +550,8 @@ sub app {
                            . $c->req->url->path . " ref="
                            . ( $c->req->headers->referrer // '(none)' )
                            . " return_to="
-                           . ( $c->param( 'return_to' ) // '(none)' )
-                           . " hash="
-                           . ( $c->param( 'hash' ) // '(none)' ) );
+                           . ( $c->param( 'return_to' ) // '(none)' ) . " ih="
+                           . ( $c->param( 'ih' )        // '(none)' ) );
       $c->app->log->debug(   prefix_dbg()
                            . "  add_one GET return_to_in="
                            . ( $c->param( 'return_to' ) // '(none)' ) );
@@ -529,7 +584,7 @@ sub app {
       }
 
       my ( $local_by_ih, $cache_mtime, $cache_src ) =
-          QBTL::LocalCache::get_local_by_ih(
+          QBTL::LocalCache::get_local_by_hash(
                                        root_dir => ( $opts->{root_dir} || '.' ),
                                        opts_local => {torrent_dir => "/"}, );
       $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
@@ -558,60 +613,60 @@ sub app {
         _add_one_advance( $c->app );
       }
 
-      # Optional explicit hash (?hash=...)
-      my $want_hash = $c->param( 'hash' ) // '';
-      $want_hash =~ s/\s+//g;
-      $want_hash = '' unless $want_hash =~ /^[0-9a-f]{40}$/;
+      # Optional explicit ih (?ih=...)
+      my $want_ih = $c->param( 'ih' ) // '';
+      $want_ih =~ s/\s+//g;
+      $want_ih = '' unless $want_ih =~ /^[0-9a-f]{40}$/;
 
-      my $pick_hash;
+      my $pick_ih;
 
-      if ( $want_hash ) {
-        $pick_hash = $want_hash;
+      if ( $want_ih ) {
+        $pick_ih = $want_ih;
 
-        unless ( exists $local_by_ih->{$pick_hash} ) {
+        unless ( exists $local_by_ih->{$pick_ih} ) {
           return
               $c->render(
-                 template => 'qbt_add_one',
-                 error => "Requested hash not found in local cache: $want_hash",
-                 return_to => $return_to, );
+                     template => 'qbt_add_one',
+                     error => "Requested ih not found in local cache: $want_ih",
+                     return_to => $return_to, );
         }
 
-        if ( exists $qbt_by_ih->{$pick_hash} ) {
+        if ( exists $qbt_by_ih->{$pick_ih} ) {
           return
               $c->render(
             template => 'qbt_add_one',
             error    =>
-"Requested hash already exists in qBittorrent: \n\t$pick_hash\n\t$want_hash",
+"Requested ih already exists in qBittorrent: \n\t$pick_ih\n\t$want_ih",
             return_to => $return_to, );
         }
       }
       else {
-        $pick_hash = $st->{queue}[ $st->{idx} ] if @{$st->{queue} || []};
+        $pick_ih = $st->{queue}[ $st->{idx} ] if @{$st->{queue} || []};
       }
 
       return
           $c->render(
                       template  => 'qbt_add_one',
                       return_to => $return_to,
-          ) unless $pick_hash;
+          ) unless $pick_ih;
 
-      my $rec = $local_by_ih->{$pick_hash};
+      my $rec = $local_by_ih->{$pick_ih};
       my $source_path =
           ( ref( $rec ) eq 'HASH' ) ? ( $rec->{source_path} // '' ) : '';
 
       if ( !$source_path ) {
         return
             $c->render(
-                        template => 'qbt_add_one',
-                        error => "Picked $pick_hash but no source_path found",
+                        template  => 'qbt_add_one',
+                        error     => "Picked $pick_ih but no source_path found",
                         return_to => $return_to, );
       }
 
-      my $meta = _add_one_state( $c->app )->{meta}{$pick_hash} || {};
+      my $meta = _add_one_state( $c->app )->{meta}{$pick_ih} || {};
 
       $c->stash(
                  picked => {
-                            hash        => $pick_hash,
+                            ih          => $pick_ih,
                             source_path => $source_path,
                  },
                  add_one_meta    => $meta,
@@ -630,18 +685,18 @@ sub app {
       my $c = shift;
       $c->stash( dev_mode => ( $opts->{dev_mode} ? 1 : 0 ) );
 
-      my $hash = $c->param( 'hash' ) // '';
-      $hash =~ s/\s+//g;
+      my $ih = $c->param( 'ih' ) // '';
+      $ih =~ s/\s+//g;
 
       my $source_path = $c->param( 'source_path' ) // '';
 
-      unless ( $hash =~ /^[0-9a-f]{40}$/ ) {
+      unless ( $ih =~ /^[0-9a-f]{40}$/ ) {
         return
             $c->render(
                         template => 'qbt_add_one',
-                        error    => "bad hash",
+                        error    => "bad ih",
                         picked   => {
-                                   hash        => $hash,
+                                   ih          => $ih,
                                    source_path => $source_path
                         } );
       }
@@ -655,7 +710,7 @@ sub app {
                         template => 'qbt_add_one',
                         error    => "confirm required",
                         picked   => {
-                                   hash        => $hash,
+                                   ih          => $ih,
                                    source_path => $source_path,
                         }, );
       }
@@ -666,7 +721,7 @@ sub app {
                         template => 'qbt_add_one',
                         error    => "missing source_path",
                         picked   => {
-                                   hash        => $hash,
+                                   ih          => $ih,
                                    source_path => $source_path,
                         }, );
       }
@@ -680,8 +735,8 @@ sub app {
 
 # --- Pre-check: already exists in qBittorrent? (stale queue / already added) ---
       my $exists = eval {
-        my $t = $qbt->api_torrents_info_one( $hash );
-        ( ref( $t ) eq 'HASH' && ( $t->{hash} // '' ) =~ /^[0-9a-f]{40}$/ )
+        my $t = $qbt->api_torrents_info_one( $ih );
+        ( ref( $t ) eq 'HASH' && ( $t->{ih} // '' ) =~ /^[0-9a-f]{40}$/ )
             ? 1
             : 0;
       };
@@ -690,74 +745,68 @@ sub app {
         my $err = "$@";
         chomp $err;
 
-        _add_one_mark_fail( $c->app, $hash,
-                            "torrent_exists check failed: $err" );
+        _add_one_mark_fail( $c->app, $ih, "torrent_exists check failed: $err" );
 
-        $processed->{$hash} = {
-                              status     => 'error',
-                              ts         => time,
-                              last_error => "torrent_exists check failed: $err",
-                              source_path => $source_path,};
+        $processed->{$ih} = {
+                             status      => 'error',
+                             ts          => time,
+                             last_error  => "torrent_exists check failed: $err",
+                             source_path => $source_path,};
 
-        _add_one_remove_hash( $c->app, $hash );
+        _add_one_remove_ih( $c->app, $ih );
         my $st = _add_one_state( $c->app );
-        $app->log->debug(   basename( __FILE__ ) . ":"
-                          . __LINE__
+        $app->log->debug(   prefix_dbg
                           . " [add_one] after remove ih: "
-                          . "$hash idx: $st->{idx} queue_n: "
+                          . "$ih idx: $st->{idx} queue_n: "
                           . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
                         error    => "torrent_exists check failed: $err",
-                        picked => {hash => $hash, source_path => $source_path},
-            );
+                        picked   => {ih => $ih, source_path => $source_path}, );
       }
 
       if ( $exists ) {
 
      # If it's an infohash-as-name torrent, "allow" by routing to the fix action
-        my $t        = $qbt->api_torrents_info_one( $hash );
+        my $t        = $qbt->api_torrents_info_one( $ih );
         my $qbt_name = ( ref( $t ) eq 'HASH' ) ? ( $t->{name} // '' ) : '';
 
-        if ( length( $qbt_name ) && $qbt_name eq $hash ) {
-          return $c->redirect_to( "/qbt/hashname?hash=$hash" );
+        if ( length( $qbt_name ) && $qbt_name eq $ih ) {
+          return $c->redirect_to( "/qbt/hashname?hash=$ih" );
         }
 
         my $msg =
             "Already exists in qBittorrent (stale queue or previously added):"
-            . $hash;
+            . $ih;
 
-        _add_one_mark_fail( $c->app, $hash, $msg );
+        _add_one_mark_fail( $c->app, $ih, $msg );
 
-        $processed->{$hash} = {
-                               status      => 'exists',
-                               ts          => time,
-                               last_error  => $msg,
-                               source_path => $source_path,};
+        $processed->{$ih} = {
+                             status      => 'exists',
+                             ts          => time,
+                             last_error  => $msg,
+                             source_path => $source_path,};
 
-        _add_one_remove_hash( $c->app, $hash );
+        _add_one_remove_ih( $c->app, $ih );
         my $st = _add_one_state( $c->app );
-        $app->log->debug(   basename( __FILE__ ) . ":"
-                          . __LINE__
-                          . " AFTER REMOVE ih: $hash idx: $st->{idx} queue_n: "
+        $app->log->debug(   prefix_dbg()
+                          . " AFTER REMOVE ih: $ih idx: $st->{idx} queue_n: "
                           . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
                         error    => $msg,
-                        picked => {hash => $hash, source_path => $source_path},
-            );
+                        picked   => {ih => $ih, source_path => $source_path}, );
       }
 
       my $sz      = ( -e $source_path ) ? ( -s $source_path ) : 0;
       my $ih_file = eval { _infohash_from_torrent_file( $source_path ) };
       $ih_file = $@ ? "(ih parse failed: $@)" : $ih_file;
 
-      $app->log->debug(   basename( __FILE__ ) . ":"
-                        . __LINE__
-                        . " PREFLIGHT: \n\tsize:$sz pick_hash: "
-                        . short_ih( $hash )
+      $app->log->debug(   prefix_dbg()
+                        . " PREFLIGHT: \n\tsize:$sz pick_ih: "
+                        . short_ih( $ih )
                         . " file_ih: "
                         . short_ih( $ih_file )
                         . "\n\tpath: $source_path" );
@@ -774,8 +823,8 @@ sub app {
       my $pending_root_rename_data;
 
       my $ok = eval {
-        my $rec = $local_by_ih->{$hash};
-        die "no local record for $hash" unless ref( $rec ) eq 'HASH';
+        my $rec = $local_by_ih->{$ih};
+        die "no local record for $ih" unless ref( $rec ) eq 'HASH';
 
         my @sp_dbg;
         ( $savepath, $why ) =
@@ -787,7 +836,7 @@ sub app {
 
           # minimal record for NO_HITS (stash whatever you have)
           my $nohit = {
-            ih          => $hash,    # <-- use the infohash key you’re in
+            ih          => $ih,    # <-- use the infohash key you’re in
             name        => ( $rec->{name}        // '' ),
             bucket      => ( $rec->{bucket}      // '' ),
             tracker     => ( $rec->{tracker}     // '' ),
@@ -802,21 +851,20 @@ sub app {
 
           classify_no_hits( $app, $nohit, "savepath_not_found" );
 
-          _add_one_mark_fail( $c->app, $hash, "NO_HITS: savepath_not_found" )
+          _add_one_mark_fail( $c->app, $ih, "NO_HITS: savepath_not_found" )
               ;                               # optional
-          _add_one_remove_hash( $c->app, $hash );
+          _add_one_remove_ih( $c->app, $ih );
 
           my $st = _add_one_state( $c->app );
-          $app->log->debug( basename( __FILE__ ) . ":"
-                 . __LINE__
-                 . " [add_one] NO_HITS removed ih=$hash idx=$st->{idx} queue_n="
-                 . scalar( @{$st->{queue} || []} ) );
+          $app->log->debug( prefix_dbg()
+                   . " [add_one] NO_HITS removed ih=$ih idx=$st->{idx} queue_n="
+                   . scalar( @{$st->{queue} || []} ) );
 
   # then bounce back to referrer (or torrents) instead of rendering the red page
           return $c->redirect_to( $c->req->headers->referrer // '/torrents' );
 
           # signal to caller that we “handled” this ih as NO_HITS
-          $add = 0;    # if you use $add later
+          $add = 0;                           # if you use $add later
           return ( 0, "no_hit" );
         }
 
@@ -838,15 +886,12 @@ sub app {
           $hit_path =~ s/\s+\z//;
         }
 
-        $app->log->debug(   basename( __FILE__ ) . ":"
-                          . __LINE__
-                          . " dbg hit_path="
-                          . ( $hit_path || '(empty)' ) );
+        $app->log->debug(
+                 prefix_dbg() . " dbg hit_path=" . ( $hit_path || '(empty)' ) );
 
         my $torrent_top_dbg = torrent_top_lvl_from_rec( $rec );
         my $is_multi_dbg    = _is_multi_file_torrent( $rec ) ? 1 : 0;
-        $app->log->debug( basename( __FILE__ ) . ":"
-                . __LINE__
+        $app->log->debug( prefix_dbg()
                 . " dbg torrent_top_lvl=$torrent_top_dbg is_multi=$is_multi_dbg"
         );
 
@@ -863,8 +908,7 @@ sub app {
                                               hit_path => $hit_path,
                                               savepath => $savepath, );
 
-          $app->log->debug(   basename( __FILE__ ) . ":"
-                            . __LINE__
+          $app->log->debug(   prefix_dbg()
                             . "\n\tdbg disk_file_dir=$disk_file_dir_dbg"
                             . "\n\tdbg disk_parent_dir=$disk_parent_dir_dbg"
                             . "\n\tdbg disk_root_name=$disk_root_dbg"
@@ -873,8 +917,7 @@ sub app {
                             . ( $munged_save_dbg || '(empty)' ) );
 
           if ( ref( $rename_dbg ) eq 'HASH' ) {
-            $app->log->debug( basename( __FILE__ ) . ":"
-                      . __LINE__
+            $app->log->debug( prefix_dbg()
                       . " dbg rename_intent: "
                       . ( $rename_dbg->{torrent_top_lvl} // '(undef)' ) . " -> "
                       . ( $rename_dbg->{drivespace_top_lvl} // '(undef)' ) );
@@ -883,15 +926,12 @@ sub app {
             $pending_root_rename_data = $rename_dbg;
           }
           else {
-            $app->log->debug(   basename( __FILE__ ) . ":"
-                              . __LINE__
-                              . " dbg rename_intent: (none)" );
+            $app->log->debug( prefix_dbg() . " dbg rename_intent: (none)" );
           }
         }
 
         if ( length $hit_path ) {
-          $app->log->debug( basename( __FILE__ ) . ":"
-                      . __LINE__
+          $app->log->debug( prefix_dbg()
                       . " DEBUG: about to call munge_savepath_and_root_rename  "
                       . " hit_path: $hit_path" );
 
@@ -907,8 +947,7 @@ sub app {
         }
 
         $app->log->debug(
-                  basename( __FILE__ ) . ":"
-                . __LINE__
+                  prefix_dbg()
                 . " savepath_final: $savepath "
                 . (
               ref( $pending_root_rename_data ) eq 'HASH'
@@ -917,7 +956,7 @@ sub app {
               : "" ) );
 
         $add = $qbt->api_torrents_add( $source_path, $savepath );
-        die "add returned non-hash" unless ref( $add ) eq 'HASH';
+        die "add returned non-ih" unless ref( $add ) eq 'HASH';
 
         1;
       };
@@ -927,11 +966,11 @@ sub app {
         my $err = "$@";
         chomp $err;
 
-        _add_one_mark_fail( $c->app, $hash, $err );
+        _add_one_mark_fail( $c->app, $ih, $err );
         classify_triage(
                          $c->app,
                          {
-                          ih          => $hash,
+                          ih          => $ih,
                           key         => 'add_one_eval',
                           path        => '/qbt/add_one',
                           err         => $err,
@@ -939,25 +978,23 @@ sub app {
                           savepath    => ( $savepath || '' ),
                          },
                          'add_one_failed', );
-        $processed->{$hash} = {
-                               status      => 'failed',
-                               ts          => time,
-                               last_error  => $err,
-                               source_path => $source_path,
-                               savepath    => ( $savepath || '' ),};
+        $processed->{$ih} = {
+                             status      => 'failed',
+                             ts          => time,
+                             last_error  => $err,
+                             source_path => $source_path,
+                             savepath    => ( $savepath || '' ),};
 
-        _add_one_remove_hash( $c->app, $hash );
+        _add_one_remove_ih( $c->app, $ih );
         my $st = _add_one_state( $c->app );
-        $app->log->debug( basename( __FILE__ ) . ":"
-                . __LINE__
-                . "  [add_one] after remove ih: $hash idx: $st->{idx} queue_n: "
-                . scalar( @{$st->{queue} || []} ) );
+        $app->log->debug( prefix_dbg()
+                  . "  [add_one] after remove ih: $ih idx: $st->{idx} queue_n: "
+                  . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
                         error    => $err,
-                        picked => {hash => $hash, source_path => $source_path},
-            );
+                        picked   => {ih => $ih, source_path => $source_path}, );
       }
 
       # but if we returned (0,"no_hit") from inside eval, it did NOT die.
@@ -968,64 +1005,60 @@ sub app {
         return $c->redirect_to( $back );
       }
       my $body = $add->{body} // '';
-      $app->log->debug( basename( __FILE__ ) . ":"
-        . __LINE__
+      $app->log->debug( prefix_dbg()
         . " add_one: ok: $add->{ok} code=$add->{code} body: $body savepath: $savepath"
       );
 
       unless ( $add->{ok} ) {
         my $err = "Add failed: HTTP $add->{code} $body";
-        _add_one_mark_fail( $c->app, $hash, $err );
+        _add_one_mark_fail( $c->app, $ih, $err );
 
-        $processed->{$hash} = {
-                               status      => 'failed',
-                               ts          => time,
-                               last_error  => $err,
-                               source_path => $source_path,
-                               savepath    => ( $savepath || '' ),};
+        $processed->{$ih} = {
+                             status      => 'failed',
+                             ts          => time,
+                             last_error  => $err,
+                             source_path => $source_path,
+                             savepath    => ( $savepath || '' ),};
 
-        _add_one_remove_hash( $c->app, $hash );
+        _add_one_remove_ih( $c->app, $ih );
         my $st = _add_one_state( $c->app );
-        $app->log->debug( basename( __FILE__ ) . ":"
-                 . __LINE__
-                 . " [add_one] after remove ih: $hash idx: $st->{idx} queue_n: "
-                 . scalar( @{$st->{queue} || []} ) );
+        $app->log->debug( prefix_dbg()
+                   . " [add_one] after remove ih: $ih idx: $st->{idx} queue_n: "
+                   . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
                         error    => $err,
-                        picked => {hash => $hash, source_path => $source_path},
-            );
+                        picked   => {ih => $ih, source_path => $source_path}, );
       }
 
       if ( $body =~ /fails/i ) {
         my $err = "qBittorrent refused add: $body";
-        _add_one_mark_fail( $c->app, $hash, $err );
+        _add_one_mark_fail( $c->app, $ih, $err );
 
-        $processed->{$hash} = {
-                               status      => 'failed',
-                               ts          => time,
-                               last_error  => $err,
-                               source_path => $source_path,
-                               savepath    => ( $savepath || '' ),};
+        $processed->{$ih} = {
+                             status      => 'failed',
+                             ts          => time,
+                             last_error  => $err,
+                             source_path => $source_path,
+                             savepath    => ( $savepath || '' ),};
 
-        _add_one_remove_hash( $c->app, $hash );
+        _add_one_remove_ih( $c->app, $ih );
         my $st = _add_one_state( $c->app );
         $app->log->debug(
-          basename( __FILE__ ) . ":" . __LINE__ . "
- [add_one] after remove ih: $hash idx: $st->{idx} queue_n: "
+          prefix_dbg() . "
+ [add_one] after remove ih: $ih idx: $st->{idx} queue_n: "
               . scalar( @{$st->{queue} || []} ) );
         return
             $c->render(
                         template => 'qbt_add_one',
                         error    => $err,
-                        picked => {hash => $hash, source_path => $source_path},
-            );
+                        picked   => {ih => $ih, source_path => $source_path}, );
       }
 
 # ---------- hand off to Queue.pm (no inline post-check, no inline recheck) ----------
       my $pending_root_rename_data;
-      my $rec = $local_by_ih->{$hash};
+      my $rec = $local_by_ih->{$ih};
       if (    ref( $rec ) eq 'HASH'
            && ref( $rec->{pending_root_rename_data} ) eq 'HASH' )
       {
@@ -1039,31 +1072,28 @@ sub app {
             . ( $pending_root_rename_data->{drivespace_top_lvl} // '?' );
       }
 
-      $app->log->debug(   basename( __FILE__ ) . ":"
-                        . __LINE__
-                        . " rename_intent: $rr_dbg\n", );
+      $app->log->debug( prefix_dbg() . " rename_intent: $rr_dbg\n", );
 
       QBTL::Queue->enqueue_add_one(
-                          $c->app, $hash,
+                          $c->app, $ih,
                           source_path              => $source_path,
                           savepath                 => ( $savepath || '' ),
                           pending_root_rename_data => $pending_root_rename_data,
       );
 
-      $processed->{$hash} = {
-                             status      => 'pending',
-                             ts          => time,
-                             last_error  => 'queued to QBTL::Queue',
-                             source_path => $source_path,
-                             savepath    => ( $savepath || '' ),};
+      $processed->{$ih} = {
+                           status      => 'pending',
+                           ts          => time,
+                           last_error  => 'queued to QBTL::Queue',
+                           source_path => $source_path,
+                           savepath    => ( $savepath || '' ),};
 
-      _add_one_remove_hash( $c->app, $hash );
+      _add_one_remove_ih( $c->app, $ih );
       my $st = _add_one_state( $c->app );
 
-      $app->log->debug( basename( __FILE__ ) . ":"
-                 . __LINE__
-                 . " [add_one] after remove ih: $hash idx: $st->{idx} queue_n: "
-                 . scalar( @{$st->{queue} || []} . "\n\n" ) );
+      $app->log->debug( prefix_dbg()
+                   . " [add_one] after remove ih: $ih idx: $st->{idx} queue_n: "
+                   . scalar( @{$st->{queue} || []} . "\n\n" ) );
       $c->app->defaults->{qbt_snap_ts} = 0;
 
       my $return_to = $c->param( 'return_to' ) // '';
@@ -1075,9 +1105,8 @@ sub app {
         $return_to = '/qbt/add_one';
       }
 
-      $app->log->debug(   basename( __FILE__ ) . ":"
-                        . __LINE__
-                        . " add_one queued ih: $hash return_to: $return_to" );
+      $app->log->debug(
+               prefix_dbg() . " add_one queued ih: $ih return_to: $return_to" );
       return $c->redirect_to( $return_to );
 
     } );
@@ -1098,15 +1127,15 @@ sub app {
       for my $t ( @$list ) {
         next unless ref( $t ) eq 'HASH';
 
-        my $hash = $t->{hash} // '';
+        my $ih   = $t->{ih}   // '';
         my $name = $t->{name} // '';
-        next unless $hash =~ /^[0-9a-f]{40}$/;
+        next unless $ih =~ /^[0-9a-f]{40}$/;
         next
-            unless length( $name ) && $name eq $hash; # only “hashname” torrents
+            unless length( $name ) && $name eq $ih;    # only “ihname” torrents
 
         push @rows,
             {
-             hash      => $hash,
+             ih        => $ih,
              name      => $name,
              progress  => ( exists $t->{progress} ? $t->{progress} : '' ),
              save_path => ( $t->{save_path} // '' ),};
@@ -1310,7 +1339,7 @@ sub app {
 
        push @rows,
            {
-            hash        => $ih,
+            ih          => $ih,
             name        => $name,
             total_size  => ( $total_size || 0 ),
             source_path => $source_path,
@@ -1322,7 +1351,7 @@ sub app {
      if ( length $q ) {
        my $re = qr/\Q$q\E/i;
        @rows = grep {
-                ( ( $_->{hash} // '' ) =~ $re )
+                ( ( $_->{ih} // '' ) =~ $re )
              || ( ( $_->{name}        // '' ) =~ $re )
              || ( ( $_->{source_path} // '' ) =~ $re )
        } @rows;
@@ -1428,7 +1457,7 @@ sub app {
 
 
 #   $r->post(
-#     '/qbt/refresh_hashname' => sub {
+#     '/qbt/refresh_ihname' => sub {
 #       my $c = shift;
 #
 #       my $qbt = QBTL::QBT->new({ app => $c->app });
@@ -1452,7 +1481,7 @@ sub app {
 #       return $c->render( template => 'qbt_no_hits' );
 #     } );
 #   $r->post(
-#     '/qbt/refresh_hashname' => sub {
+#     '/qbt/refresh_ihname' => sub {
 #       my $c = shift;
 #
 #       my $qbt = QBTL::QBT->new({ app => $c->app });
@@ -1482,12 +1511,12 @@ sub app {
 # }
 
 # sub _add_one_note_fail {
-#   my ( $app, $hash, $err, %extra ) = @_;
-#   return unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
+#   my ( $app, $ih, $err, %extra ) = @_;
+#   return unless defined $ih && $ih =~ /^[0-9a-f]{40}$/;
 #
 #   my $m = _add_one_meta_ref( $app );
 #
-#   my $rec = ( $m->{$hash} ||= {hash => $hash, retries => 0, fails => 0} );
+#   my $rec = ( $m->{$ih} ||= {ih => $ih, retries => 0, fails => 0} );
 #
 #   $rec->{fails}++;
 #   $rec->{failed_once} = 1 if $rec->{fails} >= 1;
@@ -1501,12 +1530,12 @@ sub app {
 # }
 
 # sub _add_one_note_ok {
-#   my ( $app, $hash, %extra ) = @_;
-#   return unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
+#   my ( $app, $ih, %extra ) = @_;
+#   return unless defined $ih && $ih =~ /^[0-9a-f]{40}$/;
 #
 #   my $m = _add_one_meta_ref( $app );
 #
-#   my $rec = ( $m->{$hash} ||= {hash => $hash, retries => 0, fails => 0} );
+#   my $rec = ( $m->{$ih} ||= {ih => $ih, retries => 0, fails => 0} );
 #   $rec->{ts_ok} = time;
 #
 #   for my $k ( keys %extra ) { $rec->{$k} = $extra{$k} }
@@ -1561,7 +1590,7 @@ sub app {
 #   die "bad ih" unless defined( $ih ) && $ih =~ /^[0-9a-f]{40}$/;
 #
 #   my $p = _pending_ref( $app );
-#   my $t = ( $p->{$ih} ||= {hash => $ih, ts_created => time} );
+#   my $t = ( $p->{$ih} ||= {ih => $ih, ts_created => time} );
 #
 #   $t->{ts_updated} = time;
 #
@@ -1591,8 +1620,8 @@ sub app {
 #   } or do {
 #     my $err = "$@";
 #     chomp $err;
-#     for my $hash ( keys %$tasks ) {
-#       my $t = $tasks->{$hash};
+#     for my $ih ( keys %$tasks ) {
+#       my $t = $tasks->{$ih};
 #       next unless ref( $t ) eq 'HASH';
 #       $t->{stage}  = 'fail';
 #       $t->{reason} = "observer: QBT init failed: $err";
@@ -1602,14 +1631,14 @@ sub app {
 #   };
 #
 #   #   QBTL::Queue->pump_tick( $app, opts => $opts );
-#   for my $hash ( keys %$tasks ) {
-#     next unless $hash =~ /^[0-9a-f]{40}$/;
+#   for my $ih ( keys %$tasks ) {
+#     next unless $ih =~ /^[0-9a-f]{40}$/;
 #
-#     my $arr = eval { $qbt->api_torrents_info( hashes => $hash ) };
+#     my $arr = eval { $qbt->api_torrents_info( ihes => $ih ) };
 #     if ( $@ ) {
 #       my $err = "$@";
 #       chomp $err;
-#       my $t = ( $tasks->{$hash} ||= {hash => $hash} );
+#       my $t = ( $tasks->{$ih} ||= {ih => $ih} );
 #       $t->{stage}  = 'fail';
 #       $t->{reason} = "observer: api_torrents_info failed: $err";
 #       $t->{ts}     = time;
@@ -1617,7 +1646,7 @@ sub app {
 #     }
 #
 #     if ( !ref( $arr ) || ref( $arr ) ne 'ARRAY' || !@$arr ) {
-#       my $t = ( $tasks->{$hash} ||= {hash => $hash} );
+#       my $t = ( $tasks->{$ih} ||= {ih => $ih} );
 #       $t->{stage} = 'new';
 #       $t->{ts}    = time;
 #       next;
@@ -1627,14 +1656,14 @@ sub app {
 #     my $state    = ( ref( $t0 ) eq 'HASH' ) ? ( $t0->{state}    // '' ) : '';
 #     my $progress = ( ref( $t0 ) eq 'HASH' ) ? ( $t0->{progress} // -1 ) : -1;
 #
-#     my $t = ( $tasks->{$hash} ||= {hash => $hash} );
+#     my $t = ( $tasks->{$ih} ||= {ih => $ih} );
 #     $t->{last_state}    = $state;
 #     $t->{last_progress} = $progress;
 #     $t->{ts}            = time;
 #
 #     if ( $state =~ /^checking/i ) {
 #       $app->log->debug(
-#                       "[observer] hash=$hash state=$state progress=$progress" );
+#                       "[observer] ih=$ih state=$state progress=$progress" );
 #       $t->{stage} = 'rechecking';
 #       next;
 #     }
@@ -1671,7 +1700,7 @@ sub app {
 #   my %by;
 #   for my $t ( @$list ) {
 #     next if ref( $t ) ne 'HASH';
-#     my $h = $t->{hash} // '';
+#     my $h = $t->{ih} // '';
 #     next unless $h =~ /^[0-9a-fA-F]{40}$/;
 #     $by{lc( $h )} = $t;
 #   }
@@ -1705,11 +1734,11 @@ sub app {
 # }
 #
 # sub _qbt_snapshot_put_one {
-#   my ( $app, $hash, $t ) = @_;
-#   return unless defined $hash && $hash =~ /^[0-9a-f]{40}$/;
+#   my ( $app, $ih, $t ) = @_;
+#   return unless defined $ih && $ih =~ /^[0-9a-f]{40}$/;
 #   return unless ref( $t ) eq 'HASH';
 #   my $snap = _qbt_snapshot( $app );
-#   $snap->{by_ih}{$hash} = $t;
+#   $snap->{by_ih}{$ih} = $t;
 #   $snap->{ts} = time;
 #   return;
 # }
@@ -1719,8 +1748,8 @@ sub app {
 #   my $tasks = _tasks_ref( $app );
 #
 #   my %counts;
-#   for my $hash ( keys %$tasks ) {
-#     my $t = $tasks->{$hash};
+#   for my $ih ( keys %$tasks ) {
+#     my $t = $tasks->{$ih};
 #     next unless ref( $t ) eq 'HASH';
 #     my $stage = $t->{stage} || 'unknown';
 #     $counts{$stage}++;
@@ -1737,8 +1766,8 @@ sub app {
 #   my $tasks = _tasks_ref( $app );
 #   my @fails;
 #
-#   for my $hash ( keys %$tasks ) {
-#     my $t = $tasks->{$hash};
+#   for my $ih ( keys %$tasks ) {
+#     my $t = $tasks->{$ih};
 #     next unless ref( $t ) eq 'HASH';
 #     next unless ( $t->{stage} || '' ) eq 'fail';
 #     push @fails, $t;
@@ -1757,13 +1786,13 @@ sub app {
 # }
 #
 # sub _task_upsert {
-#   my ( $app, $hash, %patch ) = @_;
-#   $hash = lc( $hash // '' );
+#   my ( $app, $ih, %patch ) = @_;
+#   $ih = lc( $ih // '' );
 #
 #   $app->defaults->{tasks} ||= {};
 #   my $t =
-#       ( $app->defaults->{tasks}{$hash} ||=
-#         {hash => $hash, ts_created => time} );
+#       ( $app->defaults->{tasks}{$ih} ||=
+#         {ih => $ih, ts_created => time} );
 #
 #   $t->{ts_updated} = time;
 #   @$t{keys %patch} = values %patch;
