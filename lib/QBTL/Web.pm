@@ -10,7 +10,7 @@ use Mojo::JSON   qw(true);
 use Mojo::Util   qw(md5_sum);
 use Scalar::Util qw(refaddr);
 
-use QBTL::LocalCache;
+use QBTL::LocalCache qw( get_local_by_ih );
 use QBTL::Logger;
 use QBTL::QBT;
 use QBTL::Classify qw (
@@ -296,17 +296,26 @@ sub app {
 
   $r->get(
     '/parse_smoke' => sub {
-      my $c   = shift;
-      my $res = eval { QBTL::Parse::run( all_torrents => [], opts => {} ) };
+      my $c = shift;
+
+      my $res = eval {
+        my $tp =
+            QBTL::TorrentParser->new(
+                                      {
+                                       all_torrents => [],
+                                       opts         => {},} );
+        $tp->extract_metadata();
+      };
+
       return $c->render( json => {error => "$@"} ) if $@;
-      $c->render( json => {ok => Mojo::JSON->true} );
+      return $c->render( json => {ok    => Mojo::JSON->true} );
     } );
 
   $r->post(
     '/class/zero_bytes' => sub {
       my $c  = shift;
       my $ih = $c->param( 'ih' ) // '';
-      return $c->render( text => "bad ih", status => 400 )
+      return $c->render( text => "BAD INFOHASH", status => 400 )
           unless $ih =~ /^[0-9a-f]{40}$/;
 
       my ( $local_by_ih ) =
@@ -336,7 +345,7 @@ sub app {
     '/class/qbt_default_path' => sub {
       my $c  = shift;
       my $ih = $c->param( 'ih' ) // '';
-      return $c->render( text => "bad ih", status => 400 )
+      return $c->render( text => "BAD INFOHASH", status => 400 )
           unless $ih =~ /^[0-9a-f]{40}$/;
 
       my ( $local_by_ih ) =
@@ -372,7 +381,7 @@ sub app {
     '/qbt/add_one' => sub {
       my $c = shift;
       $c->app->log->debug(   prefix_dbg()
-                           . "  add_one ctx method="
+                           . "  add_one context method="
                            . $c->req->method
                            . " path="
                            . $c->req->url->path . " ref="
@@ -412,9 +421,10 @@ sub app {
       }
 
       my ( $local_by_ih, $cache_mtime, $cache_src ) =
-          QBTL::LocalCache::get_local_by_hash(
-                                       root_dir => ( $opts->{root_dir} || '.' ),
-                                       opts_local => {torrent_dir => "/"}, );
+          get_local_by_ih(
+                           $app,
+                           root_dir   => ( $opts->{root_dir} || '.' ),
+                           opts_local => {torrent_dir => "/"}, );
       $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
 
       # Pull qbt snapshot ONLY when we need to (queue build / rebuild)
@@ -424,10 +434,16 @@ sub app {
       $qbt_by_ih = {} if ref( $qbt_by_ih ) ne 'HASH';
 
       my $st = _add_one_state( $c->app );
+      $c->app->log->debug(   prefix_dbg()
+                           . " [add_one GET] queue_n="
+                           . scalar( @{$st->{queue} || []} ) . " idx="
+                           . ( $st->{idx} // 0 )
+                           . " meta_n="
+                           . scalar( keys %{$st->{meta} || {}} ) );
 
       # Rebuild queue if empty OR cache has changed since queue build
-      unless ( @{$st->{queue} || []}
-               || ( ( $st->{cache_mtime} || 0 ) != ( $cache_mtime || 0 ) ) )
+      if ( !@{$st->{queue} || []}
+           || ( ( $st->{cache_mtime} || 0 ) != ( $cache_mtime || 0 ) ) )
       {
         _add_one_build_queue(
                               app         => $c->app,
@@ -523,7 +539,7 @@ sub app {
         return
             $c->render(
                         template => 'qbt_add_one',
-                        error    => "bad ih",
+                        error    => "BAD INFOHASH",
                         picked   => {
                                    ih          => $ih,
                                    source_path => $source_path

@@ -59,7 +59,7 @@
   <thead>
     <tr>
       % for my $col (
-      %   ['hash','hash'],
+      %   ['ih','ih'],
       %   ['name','name'],
       % ) {
         <th data-key="<%= $col->[0] %>">
@@ -102,7 +102,7 @@
   <tbody>
     % for my $t (@$sample) {
       <tr>
-        <td><code><%= $t->{hash} %></code></td>
+        <td><code><%= $t->{ih} %></code></td>
         <td><code><%= $t->{name} %></code></td>
 
         % if ($show_state) {
@@ -118,7 +118,7 @@
         <td>
           % if (stash('dev_mode')) {
             <form method="post" action="/qbt/refresh_hashnames" style="margin:0;">
-              <input type="hidden" name="hash" value="<%= $t->{hash} %>">
+              <input type="hidden" name="ih" value="<%= $t->{ih} %>">
               <button type="submit">Refresh</button>
             </form>
           % } else {

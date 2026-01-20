@@ -7,7 +7,7 @@
   <p style="color:red;"><%= stash('error') %></p>
 % }
 
-<p><b>Hash:</b> <code><%= $hash %></code></p>
+<p><b>Hash:</b> <code><%= $ih %></code></p>
 <p><b>Local .torrent:</b> <%= $source_path %></p>
 
 <h3>Plan</h3>
@@ -16,7 +16,7 @@
 </ol>
 
 <form method="post" action="/qbt/repair_one">
-  <input type="hidden" name="hash" value="<%= $hash %>">
+  <input type="hidden" name="hash" value="<%= $ih %>">
   <input type="hidden" name="source_path" value="<%= $source_path %>">
 
   <label>

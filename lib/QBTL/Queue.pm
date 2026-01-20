@@ -218,7 +218,7 @@ sub _jobs_summary {
 # ------------------------------
 sub enqueue_add_one {
   my ( $class, $app, $ih, %args ) = @_;
-  die "bad ih" unless defined( $ih ) && $ih =~ /^[0-9a-f]{40}$/;
+  die prefix_dbg . "bad ih" unless defined( $ih ) && $ih =~ /^[0-9a-f]{40}$/;
   $app->log->debug(
              prefix_dbg() . " Entered enqueue_add_one ih: " . short_ih( $ih ) );
   my $jobs = _jobs_ref( $app );

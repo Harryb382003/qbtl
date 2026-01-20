@@ -1,7 +1,7 @@
 % layout 'main';
 % title 'QBTL - Add one';
 
-% my $picked    = stash('picked');          # { hash, source_path }
+% my $picked    = stash('picked');          # { ih, source_path }
 % my $err       = stash('error') // '';
 % my $notice = flash('notice') // stash('notice') // '';
 % my $return_to = param( 'return_to' ) // stash( 'return_to' ) // '/torrents';
@@ -18,12 +18,12 @@
 % }
 
 % if ($picked && ref($picked) eq 'HASH') {
-  <p><b>Picked infohash:</b> <code><%= $picked->{hash} %></code></p>
+  <p><b>Picked infohash:</b> <code><%= $picked->{ih} %></code></p>
   <p><b>Local .torrent:</b> <%= $picked->{source_path} %></p>
 
   <!-- ADD: POST -->
   <form method="post" action="/qbt/add_one" style="margin-top:10px;">
-    <input type="hidden" name="hash" value="<%= $picked->{hash} %>">
+    <input type="hidden" name="ih" value="<%= $picked->{ih} %>">
     <input type="hidden" name="source_path" value="<%= $picked->{source_path} %>">
     <input type="hidden" name="return_to" value="<%= stash('return_to') %>">
 

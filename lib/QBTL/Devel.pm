@@ -250,7 +250,7 @@ sub register_routes {
       if ( $@ ) { return $c->render( json => {error => "qbt: $@"} ); }
 
       my $parsed = eval {
-        QBTL::Parse::run(
+        QBTL::TorrentParser->new(
                           all_torrents   => $scan->{torrents},
                           opts           => $opts2,
                           qbt_loaded_tor => $qbt_by_ih, );
@@ -310,7 +310,7 @@ sub register_routes {
       if ( $@ ) { return $c->render( json => {error => "qbt: $@"} ); }
 
       my $parsed = eval {
-        QBTL::Parse::run(
+        QBTL::TorrentParser->new(
                           all_torrents   => $scan->{torrents},
                           opts           => $opts2,
                           qbt_loaded_tor => $qbt_by_ih, );
@@ -353,7 +353,7 @@ sub register_routes {
       if ( $@ ) { return $c->render( json => {error => "scan: $@"} ); }
 
       my $parsed = eval {
-        QBTL::Parse::run( all_torrents => $scan->{torrents},
+        QBTL::TorrentParser->new( all_torrents => $scan->{torrents},
                           opts         => $opts2, );
       };
       if ( $@ ) { return $c->render( json => {error => "parse: $@"} ); }
@@ -385,7 +385,7 @@ sub register_routes {
       my $opts2 = {torrent_dir => "/"};
 
       my $scan = QBTL::Scan::run( opts => $opts2 );
-      my $parsed = QBTL::Parse::run( all_torrents => $scan->{torrents},
+      my $parsed = QBTL::TorrentParser->new( all_torrents => $scan->{torrents},
                                      opts         => $opts2 );
 
       my $local_by_ih =

@@ -10,7 +10,10 @@ use Storable    qw(nstore retrieve);
 
 use QBTL::Scan;
 use QBTL::Store;
-use QBTL::Parse;
+use Exporter 'import';
+our @EXPORT_OK = qw(
+    get_local_by_ih
+);
 
 # Public API:
 #   get_local_by_ih
@@ -78,8 +81,9 @@ sub build_local_by_ih {
     my $scan = QBTL::Scan::run( opts => $opts_local );
     die "scan returned non-HASH" unless ref( $scan ) eq 'HASH';
 
-    my $parsed = QBTL::Parse::run( all_torrents => $scan->{torrents},
-                                   opts         => $opts_local );
+    my $parsed =
+        QBTL::TorrentParser->new( all_torrents => $scan->{torrents},
+                                  opts         => $opts_local );
     die "parse returned non-HASH" unless ref( $parsed ) eq 'HASH';
 
     $local_by_ih = $parsed->{by_infohash} || $parsed->{infohash_map} || {};
