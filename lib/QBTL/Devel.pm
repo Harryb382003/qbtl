@@ -12,7 +12,6 @@ use QBTL::Utils qw(prefix_dbg);
 # use QBTL::LocalCache;
 # use QBTL::QBT;
 # use QBTL::Scan;
-# use QBTL::Parse;
 
 sub register_routes {
   my ( $app, $opts ) = @_;
@@ -83,6 +82,7 @@ sub register_routes {
         sub {
           # child (DO NOT touch $app in here)
           QBTL::LocalCache::build_local_by_ih(
+                                             $app,
                                              root_dir   => $root,
                                              opts_local => {torrent_dir => "/"},
           );
@@ -224,6 +224,7 @@ sub register_routes {
       $c->flash( notice => "Rebuilding local cache…" );
       my ( $local_by_ih ) =
           QBTL::LocalCache::build_local_by_ih(
+                           $app,
                            root_dir => ( $c->app->defaults->{root_dir} || '.' ),
                            opts_local => {torrent_dir => "/"}, );
 

@@ -77,54 +77,6 @@ sub stop {
 }
 
 # ------------------------------
-# Classification
-# ------------------------------
-
-# sub classify_no_hits {
-#   my ( $app, $rec, $why ) = @_;
-#   return 0 unless $app && ref( $rec ) eq 'HASH';
-#
-#   my $ih = $rec->{ih} // '';
-#   return 0 unless $ih =~ /^[0-9a-f]{40}$/;
-#
-#   $app->defaults->{classes} ||= {};
-#   $app->defaults->{classes}{NO_HITS} ||= {};
-#   my $h = $app->defaults->{classes}{NO_HITS};
-#
-#   # Store-time normalization: ensure the record is self-contained.
-#   $h->{$ih} = {
-#                %$rec,
-#                ih  => $ih,
-#                ts  => time,
-#                why => ( $why // 'no_hit' ),};
-#
-#   return 1;
-# }
-
-# sub classify_triage {
-#   my ( $app, $rec, $why ) = @_;
-#   return 0 unless $app && ref( $rec ) eq 'HASH';
-#
-#   my $ih = $rec->{ih} // '';
-#
-#   # allow ih='' because infra errors may not be tied to a specific torrent
-#   $ih = '' unless $ih =~ /^[0-9a-f]{40}$/;
-#
-#   $app->defaults->{classes} ||= {};
-#   $app->defaults->{classes}{TRIAGE} ||= {};
-#
-#   my $key = $rec->{key} // ( $ih || 'global' );
-#
-#   $app->defaults->{classes}{TRIAGE}{$key} = {
-#                                              %$rec,
-#                                              ts  => time,
-#                                              why => ( $why // 'triage' ),
-#                                              ih  => $ih,};
-#
-#   return 1;
-# }
-
-# ------------------------------
 # State storage
 # ------------------------------
 

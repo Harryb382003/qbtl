@@ -9,6 +9,7 @@ use File::Slurp qw(read_file write_file);
 use Storable    qw(nstore retrieve);
 
 use QBTL::Scan;
+use QBTL::Store;
 use QBTL::Parse;
 
 # Public API:
@@ -23,15 +24,15 @@ our %_MEMO;    # path -> { mtime => INT, data => HASHREF }
 our $_BROKEN = {};
 
 sub get_local_by_ih {
-  my ( %args ) = @_;
+  my ( $app, %args ) = @_;
   my ( $data, $mtime, $src ) = load_local_by_ih( %args );
   return ( $data, $mtime, $src ) if $data && ref( $data ) eq 'HASH';
 
-  return build_local_by_ih( %args );
+  return build_local_by_ih( $app, %args );
 }
 
 sub load_local_by_ih {
-  my ( %args ) = @_;
+  my ( $app, %args ) = @_;
 
   my $bin  = cache_path_bin( %args );
   my $json = cache_path_json( %args );
@@ -67,7 +68,7 @@ sub load_local_by_ih {
 }
 
 sub build_local_by_ih {
-  my ( %args )   = @_;
+  my ( $app, %args ) = @_;
   my $opts_local = $args{opts_local} || {};
   my $root_dir   = $args{root_dir}   || '.';
 
@@ -86,6 +87,8 @@ sub build_local_by_ih {
 
     1;
   };
+
+  store_put_local_primary( $app, $local_by_ih );
 
   unless ( $ok ) {
     my $e = "$@";

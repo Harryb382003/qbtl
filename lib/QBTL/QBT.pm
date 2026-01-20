@@ -21,6 +21,7 @@ sub new {
 
   my ( $class, $opts ) = @_;
   $opts ||= {};
+  die "QBTL::QBT->new missing app" unless ref($opts->{app});
 
   my $self = {
               base_url     => $opts->{base_url}     || 'http://localhost:8080',
@@ -59,7 +60,7 @@ sub api_qbt_login {
 }
 
 # ------------------------------
-# qBittorrent appliaction level methods
+# qBittorrent application level methods
 # /api/v2/app/
 # referred to as api_qbt_<function> to not confuse it with $app-> stuff leter
 
