@@ -1,14 +1,6 @@
 package QBTL::Plan;
 use common::sense;
 
-# sub norm_ih {
-#   my ($ih) = @_;
-#   return '' if !defined $ih;
-#   $ih =~ s/^\s+|\s+$//g;
-#   $ih = lc($ih);
-#   return $ih;
-# }
-
 sub normalize_hash_keys {
   my ( $href ) = @_;
   my %out;

@@ -192,7 +192,7 @@ sub app {
         next unless $name =~ /^[0-9a-fA-F]{40}$/;
         $name_is_ih++;
 
-        my $ih = lc( $t->{ih} // '' );
+        my $ih = $t->{ih} // '';
         next unless $ih =~ /^[0-9a-f]{40}$/;
         $repairable++ if exists $local_by_ih->{$ih};
       }
