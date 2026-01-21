@@ -107,7 +107,7 @@ sub _bless_paths {
     $root ||= $job->{rename}{torrent_top_lvl} // '';
   }
 
-  if ( !length( $root ) ) {
+  unless ( length( $root ) ) {
     my $arr = eval { $qbt->api_torrents_files( $ih ) };
     if ( ref( $arr ) eq 'ARRAY' && @$arr ) {
       my $p = '';

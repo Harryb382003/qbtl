@@ -21,7 +21,7 @@ sub new {
 
   my ( $class, $opts ) = @_;
   $opts ||= {};
-  die "QBTL::QBT->new missing app" unless ref($opts->{app});
+  die "QBTL::QBT->new missing app" unless ref( $opts->{app} );
 
   my $self = {
               base_url     => $opts->{base_url}     || 'http://localhost:8080',
@@ -174,7 +174,7 @@ sub api_torrents_files {
   for my $attempt ( 1 .. 2 ) {
     my $res = $self->{ua}->get( $url );
 
-    if ( !$res->is_success ) {
+    unless ( $res->is_success ) {
       my $code = $res->code // 0;
 
       # auth/session died -> login and retry once
@@ -220,16 +220,6 @@ sub api_torrents_files {
     return $json;
   }
 }
-
-# sub api_torrents_files {
-#   my ( $self, $hash ) = @_;
-#   $self->_validate_hash( $hash );
-#
-#   my $out = $self->_api_get_json( "/api/v2/torrents/files?hash=$hash" );
-#   return $out unless $out->{ok};
-#
-#   return $out->{json};    # arrayref of file hashes
-# }
 
 sub api_torrents_infohash_map {
   my ( $self ) = @_;
