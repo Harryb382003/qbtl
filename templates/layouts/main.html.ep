@@ -7,6 +7,29 @@
   <style>
     .navbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:8px 0;}
     .navbar form{margin:0;}
+    /* QBT status indicators */
+      .qbt-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        border: 1px solid #ddd;
+        border-radius: 10px;
+        font-size: 14px;
+        line-height: 1;
+        white-space: nowrap;
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        display: inline-block;
+        border: 1px solid rgba(0,0,0,.2);
+      }
+      .dot--green  { background: #2ecc71; }
+      .dot--yellow { background: #f1c40f; }
+      .dot--red    { background: #e74c3c; }
+      .qbt-msg { opacity: .85; font-size: 12px; }
 
     /* Uniform-height "buttons" for both links and real buttons */
     .navbtn{
@@ -44,7 +67,33 @@
   <div class="navbar">
       % my $ts = stash('local_cache_mtime') // app->defaults->{local_cache_mtime} // 0;
       % my $label = $ts ? scalar(localtime($ts)) : 'never';
+      % my $qh = app->defaults->{health}{qbt} || {};
+      % my $proc_up = $qh->{proc_up} ? 1 : 0;
+      % my $api_ok  = $qh->{api_ok}  ? 1 : 0;
+      % my $err     = $qh->{last_err} // '';
 
+      % my ($dot_class, $label, $msg);
+      % if (!$proc_up) {
+      %   $dot_class = 'dot--red';
+      %   $label = 'qbt down';
+      %   $msg = 'not running';
+      % } elsif (!$api_ok) {
+      %   $dot_class = 'dot--yellow';
+      %   $label = 'qbt degraded';
+      %   $msg = length($err) ? $err : 'api unavailable';
+      % } else {
+      %   $dot_class = 'dot--green';
+      %   $label = 'qbt ok';
+      %   $msg = '';
+      % }
+
+      <div class="qbt-indicator" title="<%= $msg %>">
+        <span class="dot <%= $dot_class %>"></span>
+        <span><%= $label %></span>
+        % if (length $msg) {
+          <span class="qbt-msg"><%= $msg %></span>
+        % }
+    </div>
     <a class="navbtn" href="/">Home</a>
     <a class="navbtn" href="/qbt/hashnames">QBT hash-names</a>
     <a class="navbtn" href="/qbt/repairable">Repairable</a>
