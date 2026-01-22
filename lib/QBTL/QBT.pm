@@ -12,6 +12,9 @@ use URI::Escape qw(uri_escape uri_escape_utf8);
 
 use QBTL::Logger;
 
+use Exporter 'import';
+our @EXPORT_OK = qw(qbt_echo);
+
 # ------------------------------
 # Constructor / Auth
 # {base_url}/api/v2/auth/
@@ -35,7 +38,8 @@ sub new {
 }
 
 sub api_qbt_login {
-  QBTL::Logger::debug( "#\tapi_qbt_login" );
+
+  #  QBTL::Logger::debug( "#\tapi_qbt_login" );
   my ( $self ) = shift;
 
   my $res = $self->{ua}->post(
@@ -57,6 +61,44 @@ sub api_qbt_login {
   }
 
   return {ok => 1, code => ( $res->code // 200 ), body => ''};
+}
+
+sub qbt_echo {
+  my ( %opt ) = @_;
+  my $port = int( $opt{port} || 8080 );
+
+  my $out = {
+             api_ok   => 0,
+             mode     => 'none',
+             ts       => time(),
+             pid      => 0,
+             echo_err => '',};
+
+  # ---- Stage 0: proc check (cheap, no network) ----
+  my $pid = _find_qbt_pid();
+  if ( $pid ) {
+    $out->{qbt_up} = 1;
+    $out->{mode}   = 'proc';
+    $out->{pid}    = $pid;
+    return $out;
+  }
+
+  # ---- Stage 1: port reachable (still cheap, avoids auth noise) ----
+  my $sock = IO::Socket::INET->new(
+                                    PeerAddr => '127.0.0.1',
+                                    PeerPort => $port,
+                                    Proto    => 'tcp',
+                                    Timeout  => ( $opt{timeout_s} // 0.25 ), );
+
+  if ( $sock ) {
+    close $sock;
+    $out->{qbt_ok} = 1;
+    $out->{mode}   = 'port';
+    return $out;
+  }
+
+  $out->{echo_err} = "qbt not detected (no proc, port $port closed)";
+  return $out;
 }
 
 # ------------------------------
@@ -456,34 +498,6 @@ sub _api_post_form {
   }
 }
 
-sub _validate_hash {
-  my ( undef, $ih ) = @_;
-  die "bad hash" unless defined $ih && $ih =~ /^[0-9a-f]{40}$/;
-  return 1;
-}
-
-sub _validate_hashes_pipe {
-  my ( undef, $ih ) = @_;
-  die "bad hashes" unless defined $ih && length $ih;
-
-  my $h = $ih;
-  $h =~ s/\s+//g;
-
-  die "bad hashes" unless $h =~ /^[0-9a-f]{40}(?:\|[0-9a-f]{40})*$/;
-  return $h;
-}
-
-sub _fail {
-  my ( $self, $msg, $out ) = @_;
-  $out ||= {ok => 0};
-
-  $out->{ok}  = 0    unless defined $out->{ok};
-  $out->{err} = $msg unless defined $out->{err} && length $out->{err};
-
-  die $msg if $self->{die_on_error};
-  return $out;
-}
-
 sub _api_torrents_add__multipart {
   my ( $self, $torrent_path, $savepath ) = @_;
 
@@ -508,6 +522,48 @@ sub _api_torrents_add__multipart {
           ok   => ( $res->is_success ? 1 : 0 ),
           code => ( $res->code            // 0 ),
           body => ( $res->decoded_content // '' ),};
+}
+
+sub _fail {
+  my ( $self, $msg, $out ) = @_;
+  $out ||= {ok => 0};
+
+  $out->{ok}  = 0    unless defined $out->{ok};
+  $out->{err} = $msg unless defined $out->{err} && length $out->{err};
+
+  die $msg if $self->{die_on_error};
+  return $out;
+}
+
+sub _find_qbt_pid {
+
+  # macOS: pgrep is the simplest + fast
+  my $pid = '';
+  eval {
+    $pid = qx{/usr/bin/pgrep -x qbittorrent 2>/dev/null};
+    1;
+  };
+  $pid ||= '';
+  $pid =~ s/\s+.*\z//s;    # first pid only
+  $pid =~ s/\D//g;         # keep digits
+  return $pid ? int( $pid ) : 0;
+}
+
+sub _validate_hash {
+  my ( undef, $ih ) = @_;
+  die "bad hash" unless defined $ih && $ih =~ /^[0-9a-f]{40}$/;
+  return 1;
+}
+
+sub _validate_hashes_pipe {
+  my ( undef, $ih ) = @_;
+  die "bad hashes" unless defined $ih && length $ih;
+
+  my $h = $ih;
+  $h =~ s/\s+//g;
+
+  die "bad hashes" unless $h =~ /^[0-9a-f]{40}(?:\|[0-9a-f]{40})*$/;
+  return $h;
 }
 
 1;

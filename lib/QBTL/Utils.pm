@@ -10,6 +10,7 @@ use File::Basename qw(basename dirname);
 use File::Spec;
 use File::Path           qw(make_path);
 use File::Slurp          qw(read_file write_file);
+use IO::Socket::INET     ();
 use JSON                 qw(decode_json encode_json);
 use Number::Bytes::Human ();
 use POSIX                qw(strftime);
@@ -38,38 +39,6 @@ our @EXPORT_OK = qw(
 #                     make_aref
 #                     normalize
 #                     queue_count
-
-sub _decode_utf8_safe {
-  my ( $s ) = @_;
-  return '' unless defined $s;
-  return $s if utf8::is_utf8( $s );
-  my $out = eval { Encode::decode( 'UTF-8', $s, 1 ) };
-  return defined( $out ) ? $out : $s;
-}
-
-sub _name_variants_for_spotlight {
-  my ( $name ) = @_;
-  return () unless defined $name && length $name;
-
-  my @v;
-  push @v, $name;
-  push @v, NFC( $name ), NFD( $name );
-
-  # If the name contains “smart dashes”, also try plain hyphen variants.
-  for my $dash (
-                 "\x{2010}", "\x{2011}", "\x{2012}", "\x{2013}",
-                 "\x{2014}", "\x{2212}" )
-  {
-    next unless index( $name, $dash ) >= 0;
-    ( my $h = $name ) =~ s/\Q$dash\E/-/g;
-    push @v, $h, NFC( $h ), NFD( $h );
-  }
-
-  # Dedup, preserve order
-  my %seen;
-  @v = grep { defined( $_ ) && length( $_ ) && !$seen{$_}++ } @v;
-  return @v;
-}
 
 sub human_bytes {
   my ( $bytes, $opts ) = @_;
@@ -186,21 +155,16 @@ sub locate_payload_files_named {
   sub _shq { my ( $s ) = @_; $s //= ''; $s =~ s/'/'"'"'/g; return "'$s'"; }
 }
 
-sub normalize_dashes {
-  my ( $s ) = @_;
-  return '' unless defined $s;
-
-  # Replace common Unicode hyphens/dashes/minus with ASCII hyphen-minus
-  $s =~ s/[\x{2010}\x{2011}\x{2012}\x{2013}\x{2014}\x{2212}]/-/g;
-
-  return $s;
-}
-
 sub short_ih {
   my ( $ih ) = @_;
   return $ih unless defined $ih && length( $ih ) > 10;
   $ih =~ s/^(.{4}).*(.{4})$/$1...$2/;
   return $ih;
+}
+
+sub prefix_dbg {
+  my ( $fn, $line ) = ( caller() )[ 1, 2 ];
+  return ( basename( $fn ) . ":" . $line );
 }
 
 # ---------------------------
@@ -247,10 +211,45 @@ sub epoch2str {
   return POSIX::strftime( '%Y-%m-%d %H:%M:%S', localtime( $epoch ) );
 }
 
-sub prefix_dbg {
-  my ( $fn, $line ) = ( caller() )[ 1, 2 ];
-  return ( basename( $fn ) . ":" . $line );
+# ---------------------------
+# helpers
+# ---------------------------
+
+sub _decode_utf8_safe {
+  my ( $s ) = @_;
+  return '' unless defined $s;
+  return $s if utf8::is_utf8( $s );
+  my $out = eval { Encode::decode( 'UTF-8', $s, 1 ) };
+  return defined( $out ) ? $out : $s;
 }
+
+sub _name_variants_for_spotlight {
+  my ( $name ) = @_;
+  return () unless defined $name && length $name;
+
+  my @v;
+  push @v, $name;
+  push @v, NFC( $name ), NFD( $name );
+
+  # If the name contains “smart dashes”, also try plain hyphen variants.
+  for my $dash (
+                 "\x{2010}", "\x{2011}", "\x{2012}", "\x{2013}",
+                 "\x{2014}", "\x{2212}" )
+  {
+    next unless index( $name, $dash ) >= 0;
+    ( my $h = $name ) =~ s/\Q$dash\E/-/g;
+    push @v, $h, NFC( $h ), NFD( $h );
+  }
+
+  # Dedup, preserve order
+  my %seen;
+  @v = grep { defined( $_ ) && length( $_ ) && !$seen{$_}++ } @v;
+  return @v;
+}
+
+1;
+
+=pod
 
 #
 #     locate_torrents
@@ -274,6 +273,16 @@ sub prefix_dbg {
 # ---------------------------
 # Misc utilities
 # ---------------------------
+
+# sub normalize_dashes {
+#   my ( $s ) = @_;
+#   return '' unless defined $s;
+#
+#   # Replace common Unicode hyphens/dashes/minus with ASCII hyphen-minus
+#   $s =~ s/[\x{2010}\x{2011}\x{2012}\x{2013}\x{2014}\x{2212}]/-/g;
+#
+#   return $s;
+# }
 
 # sub test_OS {
 #     my $osname = $^O;  # Built-in Perl variable for OS name
@@ -1246,3 +1255,5 @@ sub prefix_dbg {
 # }
 
 1;
+
+=cut

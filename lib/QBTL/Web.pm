@@ -12,7 +12,7 @@ use Scalar::Util qw(refaddr);
 
 use QBTL::LocalCache qw( get_local_by_ih );
 use QBTL::Logger;
-use QBTL::QBT;
+use QBTL::QBT      qw( qbt_echo );
 use QBTL::Classify qw (
     classify_triage
     classify_no_hits
@@ -44,13 +44,26 @@ sub app {
   my ( $opts ) = @_;
   $opts ||= {};
   my $app = Mojolicious->new;
+  $app->defaults->{health} ||= {};
+  $app->defaults->{health}{qbt} = qbt_echo( port => 8080 );
   $app->defaults->{store} ||= {
                                by_ih   => {},
                                classes => {},
                                runtime => {},};
   QBTL::Logger::set_log_file( $opts->{log_file} || 'qbtl.log' );
   $app->log->level( 'debug' );
-  $app->log->debug( prefix_dbg() . " pid=$$" );
+  $app->log->debug(
+      prefix_dbg()
+          . (
+        $app->defaults->{health}{qbt}{pid} || 0 != 0
+        ? " QbitTorrent running on PID: " . $app->defaults->{health}{qbt}->{pid}
+        : " QBT is not running... as" )
+          . " determined by: "
+          . (
+                $app->defaults->{health}{qbt}->{err} ne ''
+              ? $app->defaults->{health}{qbt}->{err}
+              : $app->defaults->{health}{qbt}->{mode} ) );
+
   $app->defaults->{dev_mode} = ( $opts->{dev_mode} ? 1 : 0 );
 
   my $root = $opts->{root_dir} || '.';

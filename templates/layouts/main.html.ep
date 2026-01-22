@@ -66,30 +66,30 @@
 <body>
   <div class="navbar">
       % my $ts = stash('local_cache_mtime') // app->defaults->{local_cache_mtime} // 0;
-      % my $label = $ts ? scalar(localtime($ts)) : 'never';
+      % my $nav_label = $ts ? scalar(localtime($ts)) : 'never';
       % my $qh = app->defaults->{health}{qbt} || {};
-      % my $proc_up = $qh->{proc_up} ? 1 : 0;
+      % my $proc_up = $qh->{qbt_up} ? 1 : 0;
       % my $api_ok  = $qh->{api_ok}  ? 1 : 0;
-      % my $err     = $qh->{last_err} // '';
+      % my $err     = $qh->{echo_err} // '';
 
-      % my ($dot_class, $label, $msg);
+      % my ($dot_class, $dot_label, $msg);
       % if (!$proc_up) {
       %   $dot_class = 'dot--red';
-      %   $label = 'qbt down';
+      %   $dot_label = 'qbt down';
       %   $msg = 'not running';
       % } elsif (!$api_ok) {
       %   $dot_class = 'dot--yellow';
-      %   $label = 'qbt degraded';
-      %   $msg = length($err) ? $err : 'api unavailable';
+      %   $dot_label = 'qbt degraded';
+      %   $msg = length($err) ? $err : 'qbt not responding';
       % } else {
       %   $dot_class = 'dot--green';
-      %   $label = 'qbt ok';
+      %   $dot_label = 'qbt ok';
       %   $msg = '';
       % }
 
       <div class="qbt-indicator" title="<%= $msg %>">
         <span class="dot <%= $dot_class %>"></span>
-        <span><%= $label %></span>
+        <span><%= $dot_label %></span>
         % if (length $msg) {
           <span class="qbt-msg"><%= $msg %></span>
         % }
@@ -114,7 +114,7 @@
        <form method="post" action="/localcache/rebuild">
          <input type="hidden" name="tok" value="<%= stash('rebuild_tok') // '' %>">
          <button class="navbtn navbtn--wide" type="submit">Rebuild Cache<br>
-           <small>Last: <%= $label %></small>
+           <small>Last: <%= $nav_label %></small>
          </button>
        </form>
 

@@ -6,7 +6,7 @@ use POSIX          qw(strftime);
 use File::Basename qw( dirname basename);
 use Mojo::IOLoop;
 
-use QBTL::QBT      qw (api_torrents_stop);
+use QBTL::QBT;
 use QBTL::SavePath qw( derive_savepath_from_payload );
 use QBTL::Utils    qw(
     short_ih
