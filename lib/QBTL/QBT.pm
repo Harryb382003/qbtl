@@ -65,39 +65,43 @@ sub api_qbt_login {
 
 sub qbt_echo {
   my ( %opt ) = @_;
-  my $port = int( $opt{port} || 8080 );
 
+  my $want_api = $opt{want_api} ? 1 : 0;
   my $out = {
+             qbt_up   => 0,
              api_ok   => 0,
-             mode     => 'none',
-             ts       => time(),
-             pid      => 0,
+             api_ts   => 0,
+             echo_ts  => time,
              echo_err => '',};
 
-  # ---- Stage 0: proc check (cheap, no network) ----
   my $pid = _find_qbt_pid();
-  if ( $pid ) {
-    $out->{qbt_up} = 1;
-    $out->{mode}   = 'proc';
-    $out->{pid}    = $pid;
+  unless ( $pid ) {
+    $out->{echo_err} = 'qbt not running';
     return $out;
   }
 
-  # ---- Stage 1: port reachable (still cheap, avoids auth noise) ----
-  my $sock = IO::Socket::INET->new(
-                                    PeerAddr => '127.0.0.1',
-                                    PeerPort => $port,
-                                    Proto    => 'tcp',
-                                    Timeout  => ( $opt{timeout_s} // 0.25 ), );
+  $out->{qbt_up} = 1;
 
-  if ( $sock ) {
-    close $sock;
-    $out->{qbt_ok} = 1;
-    $out->{mode}   = 'port';
-    return $out;
+  # 🚦 HARD GATE — do NOT touch API unless explicitly asked
+  return $out unless $want_api;
+
+  # ---- API probe (tight timeout) ----
+  my $ok = eval {
+    local $SIG{ALRM} = sub { die "api timeout\n" };
+    alarm 2;
+    my $qbt = QBTL::QBT->new( {timeout => 2} );
+    $qbt->api_qbt_login();
+    alarm 0;
+    1;
+  };
+  $out->{api_ts} = time;
+  if ( $ok ) {
+    $out->{api_ok} = 1;
+  }
+  else {
+    $out->{echo_err} = $@ || 'api probe failed';
   }
 
-  $out->{echo_err} = "qbt not detected (no proc, port $port closed)";
   return $out;
 }
 
@@ -547,6 +551,13 @@ sub _find_qbt_pid {
   $pid =~ s/\s+.*\z//s;    # first pid only
   $pid =~ s/\D//g;         # keep digits
   return $pid ? int( $pid ) : 0;
+}
+
+sub _qbt_health_stale {
+  my ( $h, $max_age ) = @_;
+  $max_age ||= 60;         # seconds
+  return 1 unless $h && $h->{echo_ts};
+  return ( time - $h->{echo_ts} ) > $max_age;
 }
 
 sub _validate_hash {

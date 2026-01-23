@@ -45,24 +45,15 @@ sub app {
   $opts ||= {};
   my $app = Mojolicious->new;
   $app->defaults->{health} ||= {};
-  $app->defaults->{health}{qbt} = qbt_echo( port => 8080 );
+  $app->defaults->{health}{qbt} =
+      qbt_echo( port     => 8080,
+                want_api => 0 );
   $app->defaults->{store} ||= {
                                by_ih   => {},
                                classes => {},
                                runtime => {},};
   QBTL::Logger::set_log_file( $opts->{log_file} || 'qbtl.log' );
   $app->log->level( 'debug' );
-  $app->log->debug(
-      prefix_dbg()
-          . (
-        $app->defaults->{health}{qbt}{pid} || 0 != 0
-        ? " QbitTorrent running on PID: " . $app->defaults->{health}{qbt}->{pid}
-        : " QBT is not running... as" )
-          . " determined by: "
-          . (
-                $app->defaults->{health}{qbt}->{err} ne ''
-              ? $app->defaults->{health}{qbt}->{err}
-              : $app->defaults->{health}{qbt}->{mode} ) );
 
   $app->defaults->{dev_mode} = ( $opts->{dev_mode} ? 1 : 0 );
 
@@ -73,17 +64,63 @@ sub app {
   $app->defaults->{local_cache_mtime} = 0;
   $app->defaults->{local_cache_src}   = '';
 
+  # Keep cache stamp fresh (prefer .stor else .json)
   push @{$app->renderer->paths}, File::Spec->catdir( $root, 'templates' );
   push @{$app->static->paths},   File::Spec->catdir( $root, 'ui' );
 
-  # Keep cache stamp fresh (prefer .stor else .json)
   $app->hook(
     before_dispatch => sub {
       my $c = shift;
 
+      # --- QBT HEALTH (cheap every request; API only when needed+stale) ---
+
+      $c->app->defaults->{health} ||= {};
+      my $qh = $c->app->defaults->{health}{qbt} ||= {
+                                                     qbt_up   => 0,
+                                                     api_ok   => 0,
+                                                     echo_ts  => time,
+                                                     echo_err => '',};
+
+      # always cheap (proc-only)
+      $qh = QBTL::QBT::qbt_echo( want_api => 0 );
+      $c->app->defaults->{health}{qbt} = $qh;
+
+      # decide if this route needs API
+      my $path = $c->req->url->path->to_string // '';
+      my $needs_api =
+             ( $path =~ m{\A/qbt} )
+          || ( $path =~ m{\A/queue} )
+          || ( $path =~ m{\A/triage} );
+
+      # stale if older than 60s (or never set)
+      my $stale = 1;
+      if ( $qh->{echo_ts} ) {
+        $stale = ( time - $qh->{echo_ts} ) > 60 ? 1 : 0;    # 60s
+      }
+
+      # Only then hit API
+      if ( $needs_api && $stale ) {
+        $qh = QBTL::QBT::qbt_echo( want_api => 1 );
+        $c->app->defaults->{health}{qbt} = $qh;
+      }
+
+      my $pid  = $qh->{pid} || 0;
+      my $err  = $qh->{echo_err} // $qh->{err} // '';
+      my $mode = $qh->{mode}     // '';
+      $c->app->log->debug(
+                                 prefix_dbg()
+                               . ( $pid ? " QBT up pid=$pid" : " QBT down" )
+                               . (
+                                   length( $err )
+                                   ? " err=[$err]"
+                                   : ( length( $mode ) ? " mode=$mode" : "" ) )
+      );
+
+      # --- /QBT HEALTH ---
+
       # --- PROVE REQUESTS ARE HITTING MOJO ---
-      my $m = $c->req->method                // '';
       my $p = $c->req->url->path->to_string  // '';
+      my $m = $c->req->method                // '';
       my $q = $c->req->url->query->to_string // '';
 
       # --- throttle noisy polling endpoints ---
