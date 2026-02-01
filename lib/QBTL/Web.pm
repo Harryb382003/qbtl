@@ -746,13 +746,12 @@ sub app {
             total_size  => ( $rec->{total_size}  // 0 ),
             files => ( ref( $rec->{files} ) eq 'ARRAY' ? $rec->{files} : [] ),
 
-            # optional but useful for “why did it fail”
+            # “why did it fail”
             savepath_why => ( $why // '' ),
             savepath_dbg => \@sp_dbg,         # keep it if you want
           };
 
           classify_no_hits( $app, $nohit, "savepath_not_found" );
-
           _add_one_mark_fail( $c->app, $ih, "NO_HITS: savepath_not_found" )
               ;                               # optional
           _add_one_remove_ih( $c->app, $ih );
@@ -780,12 +779,16 @@ sub app {
           if ( $ln =~ /\bhit=(.+)\z/ ) {
             $hit_path = $1;
             $hit_path =~ s/\s+\z//;
+            $app->log->debug(
+                 prefix_dbg() . " dbg hit_path=" . ( $hit_path || '(empty)' ) );
             last;
           }
         }
         if ( !$hit_path && defined $why && $why =~ /\bhit=(.+)\z/ ) {
           $hit_path = $1;
           $hit_path =~ s/\s+\z//;
+          $app->log->debug(
+                 prefix_dbg() . " dbg hit_path=" . ( $hit_path || '(empty)' ) );
         }
 
         $app->log->debug(
@@ -1025,6 +1028,15 @@ sub app {
 
     } );
 
+  $r->post(
+    '/qbt/clear_no_hits' => sub {
+      my $c = shift;
+
+      $c->app->defaults->{no_hits} = {};
+      $c->app->log->debug( prefix_dbg() . "cleared no_hits" );
+      return $c->redirect_to( '/qbt/no_hits' );
+    } );
+
   $r->get(
     '/qbt/hashnames' => sub {
       my $c = shift;
@@ -1086,19 +1098,6 @@ sub app {
     } );
 
   $r->post(
-    '/qbt/refresh_hashnames' => sub {
-      my $c  = shift;
-      my $t0 = time;
-      $c->app->log->debug( prefix_dbg() . " ENTER /qbt/hashnames" );
-
-      # simplest “refresh” behavior: just invalidate snapshot + bounce back
-      $c->app->defaults->{qbt_snap_ts} = 0;
-      $c->app->log->debug(
-             prefix_dbg() . " EXIT /qbt/hashnames dt=" . ( time - $t0 ) . "s" );
-      return $c->redirect_to( '/qbt/hashnames' );
-    } );
-
-  $r->post(
     '/qbt/refresh_no_hits' => sub {
       my $c = shift;
 
@@ -1109,54 +1108,6 @@ sub app {
       return $c->redirect_to( '/qbt/no_hits' );
     } );
 
-  $r->get(
-    '/qbt/triage' => sub {
-      my $c = shift;
-
-      my $app_id = refaddr( $c->app );
-      $c->app->log->debug( prefix_dbg() . " TRIAGE app_id=$app_id" );
-
-      $c->app->defaults->{classes} ||= {};
-
-      if ( ref( $c->app->defaults->{classes}{TRIAGE} ) ne 'HASH' ) {
-        $c->app->defaults->{classes}{TRIAGE} = {};
-      }
-
-      my $h = $c->app->defaults->{classes}{TRIAGE};
-
-      $c->app->log->debug(   prefix_dbg()
-                           . " TRIAGE ref="
-                           . ( ref( $h ) || '(undef)' )
-                           . " keys="
-                           . scalar( keys %$h ) );
-
-      my @ids =
-          sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) } keys %$h;
-
-      my @rows = map {
-        my $id  = $_;
-        my $rec = $h->{$id};
-        $rec = {} if ref( $rec ) ne 'HASH';
-        +{id => $id, %$rec}
-      } @ids;
-
-      $c->stash( found => scalar( @rows ),
-                 rows  => \@rows, );
-
-      $c->app->log->debug(
-                          prefix_dbg() . " TRIAGE keys=" . scalar( keys %$h ) );
-
-      return $c->render( template => 'qbt_triage' );
-    } );
-
-  $r->post(
-    '/qbt/clear_no_hits' => sub {
-      my $c = shift;
-
-      $c->app->defaults->{no_hits} = {};
-      $c->app->log->debug( prefix_dbg() . "cleared no_hits" );
-      return $c->redirect_to( '/qbt/no_hits' );
-    } );
   $r->get(    # Page_View
    '/torrents' => sub {
      my $c = shift;
@@ -1341,6 +1292,46 @@ sub app {
 
      return $c->render( template => 'torrents' );
    } );
+
+  $r->get(
+    '/qbt/triage' => sub {
+      my $c = shift;
+
+      my $app_id = refaddr( $c->app );
+      $c->app->log->debug( prefix_dbg() . " TRIAGE app_id=$app_id" );
+
+      $c->app->defaults->{classes} ||= {};
+
+      if ( ref( $c->app->defaults->{classes}{TRIAGE} ) ne 'HASH' ) {
+        $c->app->defaults->{classes}{TRIAGE} = {};
+      }
+
+      my $h = $c->app->defaults->{classes}{TRIAGE};
+
+      $c->app->log->debug(   prefix_dbg()
+                           . " TRIAGE ref="
+                           . ( ref( $h ) || '(undef)' )
+                           . " keys="
+                           . scalar( keys %$h ) );
+
+      my @ids =
+          sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) } keys %$h;
+
+      my @rows = map {
+        my $id  = $_;
+        my $rec = $h->{$id};
+        $rec = {} if ref( $rec ) ne 'HASH';
+        +{id => $id, %$rec}
+      } @ids;
+
+      $c->stash( found => scalar( @rows ),
+                 rows  => \@rows, );
+
+      $c->app->log->debug(
+                          prefix_dbg() . " TRIAGE keys=" . scalar( keys %$h ) );
+
+      return $c->render( template => 'qbt_triage' );
+    } );
 
   $r->get(
     '/qbt/triage_test' => sub {

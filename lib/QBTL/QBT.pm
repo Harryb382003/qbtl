@@ -177,13 +177,14 @@ sub api_torrents_info {
   my $eh = eval {
     QBTL::QBT::qbt_echo( want_api => 0, base_url => $self->{base_url} );
   } || {};
-  warn "[qbt_echo] up=$eh->{qbt_up} pid="
-      . ( $eh->{pid} // 0 )
-      . " host="
-      . ( $eh->{host} // '?' )
-      . " port="
-      . ( $eh->{port}     // '?' ) . " err="
-      . ( $eh->{echo_err} // '' ) . "\n";
+
+  #   warn "[qbt_echo] up=$eh->{qbt_up} pid="
+  #       . ( $eh->{pid} // 0 )
+  #       . " host="
+  #       . ( $eh->{host} // '?' )
+  #       . " port="
+  #       . ( $eh->{port}     // '?' ) . " err="
+  #       . ( $eh->{echo_err} // '' ) . "\n";
 
   my $url = "$self->{base_url}/api/v2/torrents/info";
 
@@ -203,19 +204,15 @@ sub api_torrents_info {
       }
       die "qbt GET /torrents/info failed: " . $res->status_line;
     }
-
     my $body = $res->decoded_content // '';
     my $list = eval { decode_json( $body ) };
     die "qbt GET /torrents/info JSON decode failed: $@"
         if $@;
-
     die "qbt GET /torrents/info expected ARRAY got "
         . ( ref( $list ) || 'SCALAR' )
         unless ref( $list ) eq 'ARRAY';
-
     return $list;
   }
-
   die "unreachable";
 }
 

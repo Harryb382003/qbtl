@@ -59,100 +59,109 @@ sub locate_payload_files_named {
   chomp $mdfind;
   return () unless $mdfind && -x $mdfind;
 
-  QBTL::Logger::debug( "[files_named] search name=[$name]" );
+  QBTL::Logger::debug( "[files_named] search name=[$name] size="
+                       . ( defined( $size_opt ) ? $size_opt : '(undef)' ) );
 
   my @hits;
 
-  # 1) exact FSName + size (if numeric size given)
-  if ( defined $size_opt && $size_opt =~ /^\d+$/ ) {
-    my $q   = qq{kMDItemFSName=="$name" && kMDItemFSSize==$size_opt};
-    my $cmd = "mdfind " . _shq( $q ) . " 2>/dev/null";
+  my $has_size = ( defined( $size_opt ) && $size_opt =~ /^\d+$/ ) ? 1 : 0;
+
+  # 1) exact FSName + size
+  if ( $has_size ) {
+    my $q =
+          qq{kMDItemFSName=="}
+        . _mdq( $name )
+        . qq{" && kMDItemFSSize==$size_opt};
+    my $cmd =
+          "LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 mdfind "
+        . _shq( $q )
+        . " 2>/dev/null";
     my @out = `$cmd`;
     chomp @out;
 
-    # mdfind outputs UTF-8; decode to Perl Unicode (prevents mojibake)
-    @out  = map  { utf8::is_utf8( $_ ) ? $_ : decode( 'UTF-8', $_ ) } @out;
+    @out  = map  { _decode_utf8_safe( $_ ) } @out;
     @hits = grep { -f $_ && $_ !~ /\.torrent$/i } @out;
+
     if ( @hits ) {
       QBTL::Logger::debug( "[files_named] exact+size hit: " . scalar( @hits ) );
       QBTL::Logger::debug( "  [cand] $_" ) for @hits;
       return wantarray ? @hits : $hits[0];
     }
+    QBTL::Logger::debug( "[files_named] exact+size miss" );
   }
 
   # 2) exact FSName (no size)
   {
-    my $q   = qq{kMDItemFSName=="$name"};
-    my $cmd = "mdfind " . _shq( $q ) . " 2>/dev/null";
+    my $q = qq{kMDItemFSName=="} . _mdq( $name ) . qq{"};
+    my $cmd =
+          "LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 mdfind "
+        . _shq( $q )
+        . " 2>/dev/null";
     my @out = `$cmd`;
     chomp @out;
+
+    @out  = map  { _decode_utf8_safe( $_ ) } @out;
     @hits = grep { -f $_ && $_ !~ /\.torrent$/i } @out;
+
     if ( @hits ) {
       QBTL::Logger::debug( "[files_named] exact-name hit: " . scalar( @hits ) );
       QBTL::Logger::debug( "  [cand] $_" ) for @hits;
       return wantarray ? @hits : $hits[0];
     }
-    else {
-      QBTL::Logger::debug( "[files_named] exact-name miss" );
-    }
+    QBTL::Logger::debug( "[files_named] exact-name miss" );
   }
 
-  # 3) glob by name, then rank by extension (videos first, images last)
+  # 3) name variants (still EXACT FSName, optionally size-locked)
   {
-    my $cmd = "mdfind -name " . _shq( $name ) . " 2>/dev/null";
     my @out;
     for my $try ( _name_variants_for_spotlight( $name ) ) {
+      my $q =
+          $has_size
+          ? qq{kMDItemFSName=="}
+          . _mdq( $try )
+          . qq{" && kMDItemFSSize==$size_opt}
+          : qq{kMDItemFSName=="} . _mdq( $try ) . qq{"};
+
       my $cmd =
-            "LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 mdfind -name "
-          . _shq( $try )
+            "LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 mdfind "
+          . _shq( $q )
           . " 2>/dev/null";
       @out = `$cmd`;
       chomp @out;
-
-      # decode output lines so Kate/web UI don’t show mojibake
       @out = map { _decode_utf8_safe( $_ ) } @out;
-
-      last if @out;    # stop at first hit set
+      last if @out;
     }
+
     @hits = grep { -f $_ && $_ !~ /\.torrent$/i } @out;
 
     if ( @hits ) {
-      QBTL::Logger::debug( "[files_named] glob hit: " . scalar( @hits ) );
+      my $label = $has_size ? "variant+size" : "variant-name";
+      QBTL::Logger::debug( "[files_named] $label hit: " . scalar( @hits ) );
       QBTL::Logger::debug( "  [cand] $_" ) for @hits;
-
-      my %rank = (
-                   (
-                     map { $_ => 1 }
-                         qw(mp4 mkv mov avi wmv ts m4v mpg mpeg flv)
-                   ),
-                   ( map { $_ => 2 } qw(iso img bin cue nrg) ),
-                   ( map { $_ => 3 } qw(mp3 flac aac m4a ogg wav) ),
-                   ( map { $_ => 4 } qw(sub srt idx vob) ),
-                   ( map { $_ => 5 } qw(jpg jpeg png gif bmp webp heic) ), );
-
-      my $ext = sub {
-        my ( $p ) = @_;
-        return '' unless defined $p;
-        return lc( $1 ) if $p =~ /\.([^.]+)$/;
-        return '';
-      };
-
-      @hits = sort {
-        my $ea = $ext->( $a );
-        my $eb = $ext->( $b );
-        my $ra = exists $rank{$ea} ? $rank{$ea} : 50;
-        my $rb = exists $rank{$eb} ? $rank{$eb} : 50;
-        $ra <=> $rb
-      } @hits;
-
-      QBTL::Logger::debug( "[files_named] glob-select $hits[0]" ) if @hits;
       return wantarray ? @hits : $hits[0];
     }
+
+    QBTL::Logger::debug( "[files_named] variants miss" );
   }
 
   return ();
 
-  sub _shq { my ( $s ) = @_; $s //= ''; $s =~ s/'/'"'"'/g; return "'$s'"; }
+  # escape for Spotlight query inside double quotes (not shell)
+  sub _mdq {
+    my ( $s ) = @_;
+    $s //= '';
+    $s =~ s/\\/\\\\/g;    # \  -> \\
+    $s =~ s/"/\\"/g;      # "  -> \"
+    return $s;
+  }
+
+  # shell-quote whole query string
+  sub _shq {
+    my ( $s ) = @_;
+    $s //= '';
+    $s =~ s/'/'"'"'/g;
+    return "'$s'";
+  }
 }
 
 sub short_ih {
