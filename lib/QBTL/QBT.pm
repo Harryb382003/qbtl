@@ -11,6 +11,7 @@ use URI;
 use URI::Escape qw(uri_escape uri_escape_utf8);
 
 use QBTL::Logger;
+use QBTL::Utils qw ( prefix_dbg );
 
 use Exporter 'import';
 our @EXPORT_OK = qw(qbt_echo);
@@ -31,7 +32,10 @@ sub new {
               username     => $opts->{username}     || 'admin',
               password     => $opts->{password}     || 'adminadmin',
               die_on_error => $opts->{die_on_error} || 0,
-              ua => LWP::UserAgent->new( cookie_jar => HTTP::Cookies->new ),
+              ua           => LWP::UserAgent->new(
+                                         cookie_jar => HTTP::Cookies->new,
+                                         imeout => ( $opts->{timeout} // 3 ),
+              ),
               %$opts,};
 
   bless $self, $class;
@@ -64,23 +68,27 @@ sub api_qbt_login {
 }
 
 sub qbt_echo {
-  my ( %opt ) = @_;
-
+  my ( $app, %opt ) = @_;
   my $want_api = $opt{want_api} ? 1 : 0;
+
+  $app->log->debug( prefix_dbg() . " want_api: " . $want_api );
+
   my $out = {
-             qbt_up   => 0,
+             pid      => 0,
              api_ok   => 0,
              api_ts   => 0,
              echo_ts  => time,
              echo_err => '',};
 
   my $pid = _find_qbt_pid();
+  $out->{pid} = $pid;
+
+  $app->log->debug( prefix_dbg() . " pid: " . $out->{pid} );
+
   unless ( $pid ) {
     $out->{echo_err} = 'qbt not running';
     return $out;
   }
-
-  $out->{qbt_up} = 1;
 
   # 🚦 HARD GATE — do NOT touch API unless explicitly asked
   return $out unless $want_api;
@@ -94,7 +102,6 @@ sub qbt_echo {
     alarm 0;
     1;
   };
-  $out->{api_ts} = time;
   if ( $ok ) {
     $out->{api_ok} = 1;
   }
@@ -102,6 +109,8 @@ sub qbt_echo {
     $out->{echo_err} = $@ || 'api probe failed';
   }
 
+  #   $out->{qbt_up} = 1;
+  $out->{pid} = $pid;
   return $out;
 }
 
@@ -164,6 +173,18 @@ sub api_torrents_delete {
 sub api_torrents_info {
   my ( $self, %args ) = @_;
 
+  # fail fast if qbt is clearly down
+  my $eh = eval {
+    QBTL::QBT::qbt_echo( want_api => 0, base_url => $self->{base_url} );
+  } || {};
+  warn "[qbt_echo] up=$eh->{qbt_up} pid="
+      . ( $eh->{pid} // 0 )
+      . " host="
+      . ( $eh->{host} // '?' )
+      . " port="
+      . ( $eh->{port}     // '?' ) . " err="
+      . ( $eh->{echo_err} // '' ) . "\n";
+
   my $url = "$self->{base_url}/api/v2/torrents/info";
 
   if ( defined $args{hashes} && length $args{hashes} ) {
@@ -174,7 +195,7 @@ sub api_torrents_info {
   for my $try ( 1 .. 2 ) {
     my $res = $self->{ua}->get( $url );
 
-    if ( !$res->is_success ) {
+    unless ( $res->is_success ) {
       my $code = $res->code // 0;
       if ( $try == 1 && ( $code == 401 || $code == 403 ) ) {
         $self->api_qbt_login();    # should die if it can't fix it

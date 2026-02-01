@@ -65,15 +65,15 @@
 </head>
 <body>
   <div class="navbar">
-      % my $ts = stash('local_cache_mtime') // app->defaults->{local_cache_mtime} // 0;
-      % my $nav_label = $ts ? scalar(localtime($ts)) : 'never';
-      % my $qh = app->defaults->{health}{qbt} || {};
-      % my $proc_up = $qh->{qbt_up} ? 1 : 0;
-      % my $api_ok = (defined $qh->{api_ok} && $qh->{api_ok}) ? 1 : 0;
-      % my $api_known = $qh->{api_ts} ? 1 : 0;
-      % my $err     = $qh->{echo_err} // '';
       % my ($dot_class, $dot_label, $msg);
-%# <pre><%= Mojo::JSON::encode_json($qh) %></pre>
+      % my $ts        = stash('local_cache_mtime') // app->defaults->{local_cache_mtime} // 0;
+      % my $nav_label = $ts ? scalar(localtime($ts)) : 'never';
+      % my $qh        = app->defaults->{health}{qbt} || {};
+      % my $proc_up   = $qh->{pid} ? 1 : 0;
+      % my $api_ok    = (defined $qh->{api_ok} && $qh->{api_ok}) ? 1 : 0;
+      % my $api_known = $qh->{api_ts} ? 1 : 0;
+      % my $err       = $qh->{echo_err} // '';
+
       % if ( !$proc_up ) {
       %   $dot_class = 'dot--red';
       %   $dot_label = 'qbt down';
@@ -94,7 +94,7 @@
         % if (length $msg) {
           <span class="qbt-msg"><%= $msg %></span>
         % }
-    </div>
+      </div>
     <a class="navbtn" href="/">Home</a>
     <a class="navbtn" href="/qbt/hashnames">QBT hash-names</a>
     <a class="navbtn" href="/qbt/repairable">Repairable</a>

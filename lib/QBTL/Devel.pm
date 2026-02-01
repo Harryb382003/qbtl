@@ -26,6 +26,7 @@ sub register_routes {
 
   $r->get(
     '/localcache/rebuild' => sub {
+      $app->log->debug( prefix_dbg() . "" );
       my $c = shift;
 
       my $tok =
@@ -251,9 +252,9 @@ sub register_routes {
 
       my $parsed = eval {
         QBTL::TorrentParser->new(
-                          all_torrents   => $scan->{torrents},
-                          opts           => $opts2,
-                          qbt_loaded_tor => $qbt_by_ih, );
+                                  all_torrents   => $scan->{torrents},
+                                  opts           => $opts2,
+                                  qbt_loaded_tor => $qbt_by_ih, );
       };
       if ( $@ ) { return $c->render( json => {error => "parse: $@"} ); }
 
@@ -311,9 +312,9 @@ sub register_routes {
 
       my $parsed = eval {
         QBTL::TorrentParser->new(
-                          all_torrents   => $scan->{torrents},
-                          opts           => $opts2,
-                          qbt_loaded_tor => $qbt_by_ih, );
+                                  all_torrents   => $scan->{torrents},
+                                  opts           => $opts2,
+                                  qbt_loaded_tor => $qbt_by_ih, );
       };
       if ( $@ ) { return $c->render( json => {error => "parse: $@"} ); }
 
@@ -354,7 +355,7 @@ sub register_routes {
 
       my $parsed = eval {
         QBTL::TorrentParser->new( all_torrents => $scan->{torrents},
-                          opts         => $opts2, );
+                                  opts         => $opts2, );
       };
       if ( $@ ) { return $c->render( json => {error => "parse: $@"} ); }
 
@@ -385,8 +386,9 @@ sub register_routes {
       my $opts2 = {torrent_dir => "/"};
 
       my $scan = QBTL::Scan::run( opts => $opts2 );
-      my $parsed = QBTL::TorrentParser->new( all_torrents => $scan->{torrents},
-                                     opts         => $opts2 );
+      my $parsed =
+          QBTL::TorrentParser->new( all_torrents => $scan->{torrents},
+                                    opts         => $opts2 );
 
       my $local_by_ih =
           $parsed->{by_infohash} || $parsed->{infohash_map} || {};

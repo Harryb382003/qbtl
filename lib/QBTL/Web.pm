@@ -46,7 +46,9 @@ sub app {
   my $app = Mojolicious->new;
   $app->defaults->{health} ||= {};
   $app->defaults->{health}{qbt} =
-      qbt_echo( port     => 8080,
+      qbt_echo(
+                $app,
+                port     => 8080,
                 want_api => 0 );
   $app->defaults->{store} ||= {
                                by_ih   => {},
@@ -73,16 +75,19 @@ sub app {
       my $c = shift;
 
       # --- QBT HEALTH (cheap every request; API only when needed+stale) ---
-
       $c->app->defaults->{health} ||= {};
+
       my $qh = $c->app->defaults->{health}{qbt} ||= {
-                                                     qbt_up   => 0,
-                                                     api_ok   => 0,
-                                                     echo_ts  => time,
-                                                     echo_err => '',};
+
+        #                                                      qbt_up   => 0,
+        api_ok   => 0,
+        echo_ts  => time,
+        echo_err => '',
+        want_api => 0,
+        pid      => 0,};
 
       # always cheap (proc-only)
-      $qh = QBTL::QBT::qbt_echo( want_api => 0 );
+      $qh = QBTL::QBT::qbt_echo( $app );
       $c->app->defaults->{health}{qbt} = $qh;
 
       # decide if this route needs API
@@ -90,38 +95,39 @@ sub app {
       my $needs_api =
              ( $path =~ m{\A/qbt} )
           || ( $path =~ m{\A/queue} )
-          || ( $path =~ m{\A/triage} );
+          || ( $path =~ m{\A/triage} )
+          || ( $path =~ m{\A/localcache} );
 
       # stale if older than 60s (or never set)
       my $stale = 1;
       if ( $qh->{echo_ts} ) {
         $stale = ( time - $qh->{echo_ts} ) > 60 ? 1 : 0;    # 60s
+        $app->log->debug( prefix_dbg() . " stale: " . $stale );
       }
 
       # Only then hit API
       if ( $needs_api && $stale ) {
-        $qh = QBTL::QBT::qbt_echo( want_api => 1 );
+        $qh = QBTL::QBT::qbt_echo( $app, want_api => 1 );
         $c->app->defaults->{health}{qbt} = $qh;
       }
 
-      my $pid  = $qh->{pid} || 0;
-      my $err  = $qh->{echo_err} // $qh->{err} // '';
-      my $mode = $qh->{mode}     // '';
+      my $pid = $qh->{pid} || 0;
+      my $err = $qh->{echo_err} // $qh->{err} // '';
+
       $c->app->log->debug(
                                  prefix_dbg()
-                               . ( $pid ? " QBT up pid=$pid" : " QBT down" )
+                               . ( $pid ? " QBT up pid: $pid" : " QBT down" )
                                . (
                                    length( $err )
-                                   ? " err=[$err]"
-                                   : ( length( $mode ) ? " mode=$mode" : "" ) )
-      );
+                                   ? " err: [$err]"
+                                   : "" ) );
 
       # --- /QBT HEALTH ---
 
       # --- PROVE REQUESTS ARE HITTING MOJO ---
-      my $p = $c->req->url->path->to_string  // '';
       my $m = $c->req->method                // '';
       my $q = $c->req->url->query->to_string // '';
+      my $p = $c->req->url->path->to_string  // '';
 
       # --- throttle noisy polling endpoints ---
       my $log_req = 1;
