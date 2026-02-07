@@ -1053,7 +1053,14 @@ sub app {
       for my $t ( @$list ) {
         next unless ref( $t ) eq 'HASH';
 
-        my $ih   = $t->{ih}   // '';
+####################
+        $app->log->debug( prefix_dbg() . "\n" );
+        for my $key ( keys $t->%* ) {
+          $app->log->debug( prefix_dbg() . " $key" . " => " . $t->{$key} );
+        }
+###################
+
+        my $ih   = $t->{hash} // '';
         my $name = $t->{name} // '';
         next unless $ih =~ /^[0-9a-f]{40}$/;
         next
@@ -1074,7 +1081,13 @@ sub app {
                  per    => scalar( @rows ), );
 
       $c->app->log->debug(
-             prefix_dbg() . " EXIT /qbt/hashnames dt=" . ( time - $t0 ) . "s" );
+              prefix_dbg() . " EXIT /qbt/hashnames dt=" . ( time - $t0 ) . "s" )
+          . " HASHNAMES stash keys="
+          . join( ",", sort keys %{$c->stash} );
+      my $qh = $c->app->defaults->{store}{qbt}{by_ih} || {};
+      $c->app->log->debug(
+               prefix_dbg() . " HASHNAMES qbt_store_n=" . scalar( keys %$qh ) );
+
       return $c->render( template => 'qbt_hashnames' );
     } );
 

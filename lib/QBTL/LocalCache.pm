@@ -8,7 +8,7 @@ use File::Temp  qw(tempfile);
 use File::Slurp qw(read_file write_file);
 use Storable    qw(nstore retrieve);
 
-use QBTL::Scan;
+# use QBTL::Scan;
 use QBTL::Store;
 use Exporter 'import';
 our @EXPORT_OK = qw(
@@ -78,7 +78,7 @@ sub build_local_by_ih {
   my $local_by_ih;
 
   my $ok = eval {
-    my $scan = QBTL::Scan::run( opts => $opts_local );
+    my $scan = QBTL::TorrentParser::run( opts => $opts_local );
     die "scan returned non-HASH" unless ref( $scan ) eq 'HASH';
 
     my $parsed =

@@ -82,6 +82,18 @@ sub torrent_paths {
   return wantarray ? @$paths : $paths;
 }
 
+sub run {
+  my ( %args ) = @_;
+  my $opts = $args{opts} || {};
+
+  my @torrents = torrent_paths( $opts );
+
+  return {
+          status   => 'ok',
+          found    => scalar( @torrents ),
+          torrents => \@torrents,};
+}
+
 sub locate_items {
   QBTL::Logger::info(
                    "Torrent paths locator complete, passing to TorrentParser" );

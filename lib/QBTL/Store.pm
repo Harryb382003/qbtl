@@ -28,8 +28,11 @@ sub store_init {
   return undef unless $app;
 
   $app->defaults->{store} ||= {
-    local_primary   => {}, # { ih => { ...torrent meta... } }  (locked records)
-    qbt_snapshot    => {}, # { ih => { ...qbt fields... } }    (locked records)
+    local_primary => {},    # { ih => { ...torrent meta... } }  (locked records)
+    qbt => {
+            by_ih => {},          # ih => locked qbt snapshot
+            ts    => 0,
+    },    # { ih => { ...qbt fields... } }    (locked records)
     local_overrides => {}, # { ih => { root_override => "...", ... } } (mutable)
     runtime         => {}, # { ih => { ... } } (mutable)
     classes         => {}, # { CLASS => { ih|id => { ... } } } (mutable)
@@ -69,20 +72,33 @@ sub store_put_qbt_snapshot {
 
   my $store = store_init( $app );
 
+  # canonical place
+  $store->{qbt} ||= {};
+  $store->{qbt}{by_ih} ||= {};
+
   my %fresh;
   for my $ih ( keys %$qbt_by_ih ) {
     next unless defined $ih && $ih =~ /^[0-9a-f]{40}$/;
+
     my $rec = $qbt_by_ih->{$ih};
     next unless ref( $rec ) eq 'HASH';
 
-    my %copy = ( %$rec, ih => $ih );
-    my $href = \%copy;
+    my %copy = ( %$rec );
 
+    # normalize: guarantee both exist and agree
+    $copy{hash} = $ih
+        unless defined( $copy{hash} ) && $copy{hash} =~ /^[0-9a-f]{40}$/;
+    $copy{ih} = $ih;    # your repo-wide rule: callers use {ih}
+
+    my $href = \%copy;
     _deep_lock( $href ) unless $opt{no_lock};
+
     $fresh{$ih} = $href;
   }
 
-  $store->{qbt_snapshot} = \%fresh;
+  $store->{qbt}{by_ih}       = \%fresh;
+  $store->{qbt}{snapshot_ts} = time;
+
   return 1;
 }
 

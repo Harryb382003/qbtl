@@ -6,7 +6,9 @@ use Mojo::IOLoop;
 use Mojo::JSON qw(true);
 use Mojo::Util qw(md5_sum);
 use Data::Dumper;
+
 use QBTL::Utils qw(prefix_dbg);
+use QBTL::TorrentParser;
 
 # use lib 'lib';
 # use QBTL::LocalCache;
@@ -239,7 +241,7 @@ sub register_routes {
 
       my $opts2 = {torrent_dir => "/"};
 
-      my $scan = eval { QBTL::Scan::run( opts => $opts2 ) };
+      my $scan = eval { QBTL::TorrentParser::run( opts => $opts2 ) };
       if ( $@ ) { return $c->render( json => {error => "scan: $@"} ); }
 
       my $qbt_by_ih = eval {
@@ -299,7 +301,7 @@ sub register_routes {
 
       my $opts2 = {torrent_dir => "/"};
 
-      my $scan = eval { QBTL::Scan::run( opts => $opts2 ) };
+      my $scan = eval { QBTL::TorrentParser::run( opts => $opts2 ) };
       if ( $@ ) { return $c->render( json => {error => "scan: $@"} ); }
 
       my $qbt_by_ih = eval {
@@ -350,7 +352,7 @@ sub register_routes {
 
       my $opts2 = {torrent_dir => "/"};
 
-      my $scan = eval { QBTL::Scan::run( opts => $opts2 ) };
+      my $scan = eval { QBTL::TorrentParser::run( opts => $opts2 ) };
       if ( $@ ) { return $c->render( json => {error => "scan: $@"} ); }
 
       my $parsed = eval {

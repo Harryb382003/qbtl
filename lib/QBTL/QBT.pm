@@ -178,13 +178,10 @@ sub api_torrents_info {
     QBTL::QBT::qbt_echo( want_api => 0, base_url => $self->{base_url} );
   } || {};
 
-  #   warn "[qbt_echo] up=$eh->{qbt_up} pid="
-  #       . ( $eh->{pid} // 0 )
-  #       . " host="
-  #       . ( $eh->{host} // '?' )
-  #       . " port="
-  #       . ( $eh->{port}     // '?' ) . " err="
-  #       . ( $eh->{echo_err} // '' ) . "\n";
+  #   warn "[qbt_echo] up=$eh->{qbt_up} pid=" . ( $eh->{pid} // 0 )
+  #       . " host=" . ( $eh->{host} // '?' )
+  #       . " port=" . ( $eh->{port}     // '?' )
+  #       . " err="  . ( $eh->{echo_err} // '' ) . "\n";
 
   my $url = "$self->{base_url}/api/v2/torrents/info";
 
