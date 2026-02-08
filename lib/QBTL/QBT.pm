@@ -71,7 +71,7 @@ sub qbt_echo {
   my ( $app, %opt ) = @_;
   my $want_api = $opt{want_api} ? 1 : 0;
 
-  $app->log->debug( prefix_dbg() . " want_api: " . $want_api );
+  #   $app->log->debug( prefix_dbg() . " want_api: " . $want_api );
 
   my $out = {
              pid      => 0,
@@ -83,14 +83,19 @@ sub qbt_echo {
   my $pid = _find_qbt_pid();
   $out->{pid} = $pid;
 
-  $app->log->debug( prefix_dbg() . " pid: " . $out->{pid} );
-
   unless ( $pid ) {
     $out->{echo_err} = 'qbt not running';
+    $app->log->debug(   prefix_dbg()
+                      . $out->{echo_err}
+                      . " want_api: "
+                      . $want_api
+                      . " pid: "
+                      . $out->{pid} );
     return $out;
   }
 
   # 🚦 HARD GATE — do NOT touch API unless explicitly asked
+
   return $out unless $want_api;
 
   # ---- API probe (tight timeout) ----
@@ -111,6 +116,12 @@ sub qbt_echo {
 
   #   $out->{qbt_up} = 1;
   $out->{pid} = $pid;
+  $app->log->debug(   prefix_dbg()
+                    . $out->{echo_err}
+                    . " want_api: "
+                    . $want_api
+                    . " pid: "
+                    . $out->{pid} );
   return $out;
 }
 

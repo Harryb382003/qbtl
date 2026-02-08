@@ -571,7 +571,7 @@ sub pump_tick {
     # Unified per-job-per-tick line: BR + pump_tick + JOB
     $app->log->debug( prefix_dbg() . "  BR:"
                 . ( $job->{bridged} ? 1 : 0 )
-                . " pump_tick : $sum "
+                . " PT: $sum"
                 . " [JOB] ih:"
                 . short_ih( $ih )
                 . " status: $status stage: $stage step_idx: $step_idx " . " F: "

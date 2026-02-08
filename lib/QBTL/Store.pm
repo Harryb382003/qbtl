@@ -99,6 +99,33 @@ sub store_put_qbt_snapshot {
   $store->{qbt}{by_ih}       = \%fresh;
   $store->{qbt}{snapshot_ts} = time;
 
+  # ---- DEBUG: write qbt snapshot json (for manual inspection) ----
+  if ( !$opt{no_dump_json} ) {
+    eval {
+      require JSON::PP;
+      require File::Spec;
+
+      my $root = $app->defaults->{root_dir} || '.';
+      my $dir  = File::Spec->catdir( $root, '.sandbox' );
+      mkdir $dir unless -d $dir;
+
+      my $path = File::Spec->catfile( $dir, 'qbt_snapshot.json' );
+
+      my $json = JSON::PP->new->utf8->pretty->canonical( 1 )
+          ->encode( $store->{qbt}{by_ih} );
+
+      open my $fh, '>', $path or die "open($path): $!";
+      print {$fh} $json;
+      close $fh;
+
+      1;
+    } or do {
+      my $e = "$@";
+      chomp $e;
+      $app->log->debug( prefix_dbg() . " qbt snapshot json write failed: $e" );
+    };
+  }
+
   return 1;
 }
 

@@ -102,7 +102,8 @@ sub app {
       my $stale = 1;
       if ( $qh->{echo_ts} ) {
         $stale = ( time - $qh->{echo_ts} ) > 60 ? 1 : 0;    # 60s
-        $app->log->debug( prefix_dbg() . " stale: " . $stale );
+
+        #         $app->log->debug( prefix_dbg() . " stale: " . $stale );
       }
 
       # Only then hit API
@@ -114,13 +115,15 @@ sub app {
       my $pid = $qh->{pid} || 0;
       my $err = $qh->{echo_err} // $qh->{err} // '';
 
-      $c->app->log->debug(
-                                 prefix_dbg()
-                               . ( $pid ? " QBT up pid: $pid" : " QBT down" )
-                               . (
-                                   length( $err )
-                                   ? " err: [$err]"
-                                   : "" ) );
+ #       $c->app->log->debug(
+ #                                  prefix_dbg()
+ #                                . " stale: "
+ #                                . $stale
+ #                                . ( $pid ? " QBT UP pid: $pid" : " QBT DOWN" )
+ #                                . (
+ #                                    length( $err )
+ #                                    ? " err: [$err]"
+ #                                    : "" ) );
 
       # --- /QBT HEALTH ---
 
@@ -148,7 +151,17 @@ sub app {
 
       if ( $log_req ) {
         $c->app->log->debug(
-                  prefix_dbg() . " REQ $m $p" . ( length( $q ) ? "?$q" : "" ) );
+                              prefix_dbg()
+                            . " REQ $m $p"
+                            . ( length( $q ) ? "?$q" : "" )
+                            . " stale: "
+                            . $stale
+                            . ( $pid ? " QBT is UP pid: $pid" : " QBT is DOWN" )
+                            . (
+                                length( $err )
+                                ? " err: [$err]"
+                                : "" )
+                            . "\n" );
       }
       my $root = $c->app->defaults->{root_dir} || '.';
 
@@ -1309,10 +1322,6 @@ sub app {
   $r->get(
     '/qbt/triage' => sub {
       my $c = shift;
-
-      my $app_id = refaddr( $c->app );
-      $c->app->log->debug( prefix_dbg() . " TRIAGE app_id=$app_id" );
-
       $c->app->defaults->{classes} ||= {};
 
       if ( ref( $c->app->defaults->{classes}{TRIAGE} ) ne 'HASH' ) {
@@ -1320,16 +1329,8 @@ sub app {
       }
 
       my $h = $c->app->defaults->{classes}{TRIAGE};
-
-      $c->app->log->debug(   prefix_dbg()
-                           . " TRIAGE ref="
-                           . ( ref( $h ) || '(undef)' )
-                           . " keys="
-                           . scalar( keys %$h ) );
-
       my @ids =
           sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) } keys %$h;
-
       my @rows = map {
         my $id  = $_;
         my $rec = $h->{$id};
@@ -1337,12 +1338,22 @@ sub app {
         +{id => $id, %$rec}
       } @ids;
 
-      $c->stash( found => scalar( @rows ),
-                 rows  => \@rows, );
+      my $newest_id = $ids[0];
+      my $newest_ih =
+            ( $newest_id && ref( $h->{$newest_id} ) eq 'HASH' )
+          ? ( $h->{$newest_id}{ih} // '' )
+          : '';
 
       $c->app->log->debug(
-                          prefix_dbg() . " TRIAGE keys=" . scalar( keys %$h ) );
+                      prefix_dbg()
+                    . " TRIAGE: "
+                    . (
+                  scalar( @ids )
+                  ? " keys: " . scalar( @ids ) . " newest_ih: " . ( $newest_ih )
+                  : "no records to triage" ) );
 
+      $c->stash( found => scalar( @rows ),
+                 rows  => \@rows, );
       return $c->render( template => 'qbt_triage' );
     } );
 
