@@ -2,14 +2,14 @@ package QBTL::LocalCache;
 
 # lib/QBTL/LocalCache.pm
 use common::sense;
-
-use JSON::PP    ();
+use Encode      qw(decode);
 use File::Temp  qw(tempfile);
 use File::Slurp qw(read_file write_file);
+use JSON::PP    ();
 use Storable    qw(nstore retrieve);
 
 # use QBTL::Scan;
-use QBTL::Store;
+use QBTL::Store qw(store_put_local_primary);
 use Exporter 'import';
 our @EXPORT_OK = qw(
     get_local_by_ih
@@ -58,8 +58,13 @@ sub load_local_by_ih {
   my $data = _load_with_memo(
     $json,
     sub {
-      my $raw  = read_file( $json );
-      my $data = JSON::PP::decode_json( $raw );
+      # read raw bytes, then decode UTF-8, then decode JSON
+      my $raw_bytes = read_file( $json, binmode => ':raw' );
+
+      # If file is valid UTF-8 JSON, this yields proper Perl characters
+      my $text = decode( 'UTF-8', $raw_bytes, 1 );  # 1 => FB_CROAK on bad UTF-8
+
+      my $data = JSON::PP::decode_json( $text );
       return $data;
     },
     %args,
@@ -72,18 +77,25 @@ sub load_local_by_ih {
 
 sub build_local_by_ih {
   my ( $app, %args ) = @_;
+
   my $opts_local = $args{opts_local} || {};
   my $root_dir   = $args{root_dir}   || '.';
 
-  my $local_by_ih;
+  my $local_by_ih = {};
 
+  # ----------------------------
+  # BUILD: scan + parse
+  # ----------------------------
   my $ok = eval {
     my $scan = QBTL::TorrentParser::run( opts => $opts_local );
     die "scan returned non-HASH" unless ref( $scan ) eq 'HASH';
 
-    my $parsed =
-        QBTL::TorrentParser->new( all_torrents => $scan->{torrents},
-                                  opts         => $opts_local );
+    my $tp = QBTL::TorrentParser->new(
+                                   {
+                                    all_torrents => ( $scan->{torrents} || [] ),
+                                    opts         => $opts_local,} );
+
+    my $parsed = $tp->extract_metadata( $args{qbt_loaded_tor} );    # optional
     die "parse returned non-HASH" unless ref( $parsed ) eq 'HASH';
 
     $local_by_ih = $parsed->{by_infohash} || $parsed->{infohash_map} || {};
@@ -91,8 +103,6 @@ sub build_local_by_ih {
 
     1;
   };
-
-  store_put_local_primary( $app, $local_by_ih );
 
   unless ( $ok ) {
     my $e = "$@";
@@ -104,19 +114,39 @@ sub build_local_by_ih {
     return ( {}, 0, 'build_failed' );
   }
 
+  # ----------------------------
+  # STORE: lock/ingest primary local dataset
+  # ----------------------------
+  eval { store_put_local_primary( $app, $local_by_ih ) if $app; 1 } or do {
+
+    # store failures should not prevent returning the dataset
+    my $e = "$@";
+    chomp $e;
+    _mark_broken(
+                  %args,
+                  key => 'store',
+                  why => "store_put_local_primary failed: $e" );
+  };
+
+  # ----------------------------
+  # PERSIST: write cache to disk
+  # ----------------------------
   my $path_json = cache_path_json( root_dir => $root_dir );
   my $path_bin  = cache_path_bin( root_dir => $root_dir );
 
-  # write binary first (fastest path for next restart)
   my $wok = eval {
+
+    # binary first (fastest path for next restart)
     nstore( $local_by_ih, $path_bin );
 
-    # write json for humans
+    # json for humans (write raw bytes to avoid encoding surprises)
     my $json =
         JSON::PP->new->utf8->pretty->canonical( 1 )->encode( $local_by_ih );
+
     my ( $fh, $tmp ) = tempfile( "$path_json.XXXX", UNLINK => 0 );
+    binmode( $fh, ':raw' );    # IMPORTANT
     print {$fh} $json;
-    close $fh;
+    close $fh or die "close($tmp): $!";
     rename $tmp, $path_json or die "rename($tmp -> $path_json): $!";
 
     1;
@@ -131,14 +161,16 @@ sub build_local_by_ih {
     return ( $local_by_ih, time(), 'memory_only' );
   }
 
-  # refresh memo immediately (no next-request lag)
+  # ----------------------------
+  # MEMO: refresh immediately (no next-request lag)
+  # ----------------------------
   my $mtime_bin  = ( stat( $path_bin ) )[9]  || time();
   my $mtime_json = ( stat( $path_json ) )[9] || time();
 
   $_MEMO{$path_bin}  = {mtime => $mtime_bin,  data => $local_by_ih};
   $_MEMO{$path_json} = {mtime => $mtime_json, data => $local_by_ih};
 
-  # IMPORTANT: since we *prefer* .stor at load time, report THAT as "Last Cache"
+  # IMPORTANT: since we prefer .stor at load time, report THAT as "Last Cache"
   return ( $local_by_ih, $mtime_bin, $path_bin );
 }
 

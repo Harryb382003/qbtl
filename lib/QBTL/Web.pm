@@ -6,9 +6,10 @@ use File::Spec;
 use File::Basename qw(dirname basename);
 use FindBin        qw($Bin);
 use Mojolicious;
-use Mojo::JSON   qw(true);
-use Mojo::Util   qw(md5_sum);
-use Scalar::Util qw(refaddr);
+use Mojo::JSON         qw(true);
+use Mojo::Util         qw(md5_sum);
+use Scalar::Util       qw(refaddr);
+use Unicode::Normalize qw(NFC NFD);
 
 use QBTL::LocalCache qw( get_local_by_ih );
 use QBTL::Logger;
@@ -461,10 +462,10 @@ sub app {
       $c->app->log->debug(   prefix_dbg()
                            . "  add_one GET return_to_in="
                            . ( $c->param( 'return_to' ) // '(none)' ) );
-
       $c->app->log->debug(   prefix_dbg()
                            . "  add_one GET return_to_ok: "
                            . ( $c->stash( 'return_to' ) // '(none)' ) );
+
       $c->stash( dev_mode => ( $opts->{dev_mode} ? 1 : 0 ) );
 
       my $return_to = $c->param( 'return_to' ) // '';
@@ -604,6 +605,8 @@ sub app {
 
       my $source_path = $c->param( 'source_path' ) // '';
 
+      $app->log->debug( prefix_dbg() . " SOURCE_PATH: $source_path\n " );
+
       unless ( $ih =~ /^[0-9a-f]{40}$/ ) {
         return
             $c->render(
@@ -714,8 +717,11 @@ sub app {
                         picked   => {ih => $ih, source_path => $source_path}, );
       }
 
-      my $sz      = ( -e $source_path ) ? ( -s $source_path ) : 0;
-      my $ih_file = eval { _infohash_from_torrent_file( $source_path ) };
+      my $sz = ( -e $source_path ) ? ( -s $source_path ) : 0;
+
+      $app->log->debug( prefix_dbg() . " SOURCE_PATH: $source_path\n " );
+
+      my $ih_file = eval { _infohash_from_torrent_file( $app, $source_path ) };
       $ih_file = $@ ? "(ih parse failed: $@)" : $ih_file;
 
       $app->log->debug(   prefix_dbg()
@@ -1547,16 +1553,31 @@ sub _fmt_savepath_debug {
 }
 
 sub _infohash_from_torrent_file {
-  my ( $path ) = @_;
+  my ( $app, $path ) = @_;
   require Bencode;
-  my $raw = do {
-    open my $fh, '<:raw', $path or die "open($path): $!";
-    local $/;
-    <$fh>;
-  };
+
+  my $raw;
+  my $used = $path;
+
+  # macOS filenames can be NFC or NFD; try both (plus original)
+  for my $try ( $path, NFC( $path ), NFD( $path ) ) {
+    next unless defined $try && length $try;
+
+    $app->log->debug( prefix_dbg() . " TRY: $try\n" );
+
+    if ( open my $fh, '<:raw', $try ) {
+      local $/;
+      $raw  = <$fh>;
+      $used = $try;
+      last;
+    }
+  }
+  die "open($path): $!" unless defined $raw;
+
   my $t = Bencode::bdecode( $raw );
   die "not a torrent (no info dict)"
       unless ref( $t ) eq 'HASH' && ref( $t->{info} ) eq 'HASH';
+
   my $info_bencoded = Bencode::bencode( $t->{info} );
   return sha1_hex( $info_bencoded );
 }
@@ -1572,6 +1593,17 @@ sub _is_multi_file_torrent {
 
   my $p = $files->[0]{path} // '';
   return ( $p =~ m{/} ) ? 1 : 0;
+}
+
+sub _open_raw_try_nf {
+  my ( $path ) = @_;
+  for my $try ( $path, NFC( $path ), NFD( $path ) ) {
+    next unless defined $try && length $try;
+    if ( open my $fh, '<:raw', $try ) {
+      return ( $fh, $try );
+    }
+  }
+  die "open($path): $!";    # keep message simple; can expand if you want
 }
 
 1;

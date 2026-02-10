@@ -4,7 +4,7 @@ package QBTL::Classify;
 use common::sense;
 use File::Basename qw(basename);
 use Scalar::Util   qw(refaddr);
-use QBTL::Utils    qw(prefix_dbg);
+use QBTL::Utils    qw(prefix_dbg short_ih);
 
 use Exporter 'import';
 our @EXPORT_OK = qw(

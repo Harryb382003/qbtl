@@ -5,7 +5,7 @@ use common::sense;
 use Scalar::Util qw(reftype);
 use Hash::Util   qw(lock_hashref unlock_hashref lock_keys);
 use Exporter 'import';
-our @EXPORT_OK = qw( store_put_qbt_snapshot );
+our @EXPORT_OK = qw( store_put_qbt_snapshot store_put_local_primary);
 
 # ------------------------------------------------------------------------------
 # Public API:

@@ -1,5 +1,6 @@
 package QBTL::QBT;
 use common::sense;
+use Encode         qw(encode_utf8);
 use File::Basename qw(
     basename
     dirname
@@ -22,10 +23,17 @@ our @EXPORT_OK = qw(qbt_echo);
 # ------------------------------
 
 sub new {
-
   my ( $class, $opts ) = @_;
   $opts ||= {};
-  die "QBTL::QBT->new missing app" unless ref( $opts->{app} );
+  die "caller must not pass ua" if exists $opts->{ua};
+
+  # Auto-enable HTTP dump in dev_mode unless caller explicitly set it
+  if ( !exists $opts->{debug_http} ) {
+    my $app = $opts->{app};
+
+    my $dev = ( ref( $app ) && $app->defaults->{dev_mode} ) ? 1 : 0;
+    $opts->{debug_http} = $dev;
+  }
 
   my $self = {
               base_url     => $opts->{base_url}     || 'http://localhost:8080',
@@ -34,9 +42,18 @@ sub new {
               die_on_error => $opts->{die_on_error} || 0,
               ua           => LWP::UserAgent->new(
                                          cookie_jar => HTTP::Cookies->new,
-                                         imeout => ( $opts->{timeout} // 3 ),
+                                         timeout => ( $opts->{timeout} // 3 ),
               ),
               %$opts,};
+
+  # optional: keep-alive off while debugging weirdness
+  # $self->{ua}->conn_cache(undef);
+
+  # --- HTTP debug (request + response dumps) ---
+  if ( $opts->{debug_http} ) {
+    $self->{ua}->add_handler( request_send  => sub { $_[0]->dump; return } );
+    $self->{ua}->add_handler( response_done => sub { $_[0]->dump; return } );
+  }
 
   bless $self, $class;
 }
@@ -186,7 +203,10 @@ sub api_torrents_info {
 
   # fail fast if qbt is clearly down
   my $eh = eval {
-    QBTL::QBT::qbt_echo( want_api => 0, base_url => $self->{base_url} );
+    QBTL::QBT::qbt_echo(
+                         undef,
+                         want_api => 0,
+                         base_url => $self->{base_url} );
   } || {};
 
   #   warn "[qbt_echo] up=$eh->{qbt_up} pid=" . ( $eh->{pid} // 0 )
