@@ -1116,15 +1116,6 @@ sub app {
 
     } );
 
-  $r->post(
-    '/qbt/clear_no_hits' => sub {
-      my $c = shift;
-
-      $c->app->defaults->{no_hits} = {};
-      $c->app->log->debug( prefix_dbg() . "cleared no_hits" );
-      return $c->redirect_to( '/qbt/no_hits' );
-    } );
-
   $r->get(
     '/qbt/hashnames' => sub {
       my $c = shift;
@@ -1179,80 +1170,56 @@ sub app {
       return $c->render( template => 'qbt_hashnames' );
     } );
 
-$r->get(
-  '/qbt/no_payload' => sub {
-    my $c = shift;
-
-    my $h = $c->app->defaults->{classes}{NO_PAYLOAD};
-    $h = {} if ref($h) ne 'HASH';
-
-    # newest first
-    my @keys =
-      sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) }
-      keys %$h;
-
-    my @rows = map {
-      my $r = $h->{$_};
-      $r = {} if ref($r) ne 'HASH';
-      +{
-        ih        => ( $r->{ih} // $_ ),
-        subclass  => ( $r->{subclass} // '' ),
-        ts        => ( $r->{ts} // 0 ),
-        why       => ( $r->{why} // '' ),
-
-        name        => ( $r->{name} // '' ),
-        bucket      => ( $r->{bucket} // '' ),
-        tracker     => ( $r->{tracker} // '' ),
-        source_path => ( $r->{source_path} // '' ),
-        total_size  => ( $r->{total_size} // 0 ),
-
-        vol      => ( $r->{vol} // '' ),
-        hit_path => ( $r->{hit_path} // '' ),
-        leaf     => ( $r->{leaf} // '' ),
-      }
-    } @keys;
-
-    my @no_hits   = grep { ( $_->{subclass} // '' ) eq 'NO_HITS' } @rows;
-    my @vol_miss  = grep { ( $_->{subclass} // '' ) eq 'VOLUME_MISSING' } @rows;
-    my @other     = grep {
-                     my $s = ( $_->{subclass} // '' );
-                     $s ne 'NO_HITS' && $s ne 'VOLUME_MISSING'
-                   } @rows;
-
-    $c->stash(
-      found_total => scalar(@rows),
-      found_hits  => scalar(@no_hits),
-      found_vols  => scalar(@vol_miss),
-
-      no_hits      => \@no_hits,
-      vol_missing  => \@vol_miss,
-      other        => \@other,
-    );
-
-    return $c->render( template => 'qbt_no_payload' );
-  }
-);
-
-# Optional: one clean clear endpoint (no redirects, no legacy names)
-$r->post(
-  '/qbt/no_payload/clear' => sub {
-    my $c = shift;
-    $c->app->defaults->{classes} ||= {};
-    $c->app->defaults->{classes}{NO_PAYLOAD} = {};
-    $c->flash( notice => "Cleared NO_PAYLOAD." );
-    return $c->redirect_to('/qbt/no_payload');
-  }
-);
-
-  $r->post(
-    '/qbt/refresh_no_hits' => sub {
+  $r->get(
+    '/qbt/no_payload' => sub {
       my $c = shift;
 
-      $c->app->log->debug( prefix_dbg() . "REQ POST /qbt/refresh_no_hits" );
+      my $h = $c->app->defaults->{classes}{NO_PAYLOAD};
+      $h = {} if ref( $h ) ne 'HASH';
 
-      # “Refresh” just bounces back; NO_HITS data is in-memory anyway.
-      # If later we store to disk, this is where we'd reload it.
-      return $c->redirect_to( '/qbt/no_hits' );
+      # newest first
+      my @keys =
+          sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) }
+          keys %$h;
+
+      my @rows = map {
+        my $r = $h->{$_};
+        $r = {} if ref( $r ) ne 'HASH';
+        +{
+          ih       => ( $r->{ih}       // $_ ),
+          subclass => ( $r->{subclass} // '' ),
+          ts       => ( $r->{ts}       // 0 ),
+          why      => ( $r->{why}      // '' ),
+
+          name        => ( $r->{name}        // '' ),
+          bucket      => ( $r->{bucket}      // '' ),
+          tracker     => ( $r->{tracker}     // '' ),
+          source_path => ( $r->{source_path} // '' ),
+          total_size  => ( $r->{total_size}  // 0 ),
+
+          vol      => ( $r->{vol}      // '' ),
+          hit_path => ( $r->{hit_path} // '' ),
+          leaf     => ( $r->{leaf}     // '' ),}
+      } @keys;
+
+      my @no_hits = grep { ( $_->{subclass} // '' ) eq 'NO_HITS' } @rows;
+      my @vol_miss =
+          grep { ( $_->{subclass} // '' ) eq 'VOLUME_MISSING' } @rows;
+      my @other = grep {
+        my $s = ( $_->{subclass} // '' );
+        $s ne 'NO_HITS' && $s ne 'VOLUME_MISSING'
+      } @rows;
+
+      $c->stash(
+        found_total => scalar( @rows ),
+        found_hits  => scalar( @no_hits ),
+        found_vols  => scalar( @vol_miss ),
+
+        no_hits     => \@no_hits,
+        vol_missing => \@vol_miss,
+        other       => \@other, );
+
+      return $c->render( template => 'qbt_no_payload' );
     } );
 
   $r->get(    # Page_View
