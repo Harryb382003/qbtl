@@ -21,6 +21,10 @@ sub derive_savepath_from_payload {
   my $files = $rec->{files};
   return ( undef, "no files[]" ) if ref( $files ) ne 'ARRAY' || !@$files;
 
+  # Cache mount map once per call (cheap; avoids per-anchor shellout)
+  my $mounted = eval { QBTL::Utils::mounted_vols_map() } || {};
+  $mounted = {} if ref( $mounted ) ne 'HASH';
+
   # 1) pick anchors: largest-first, skip junk
   my @anchors = _pick_anchors( $files, 8 );
   return ( undef, "no usable anchors" ) if !@anchors;
@@ -46,6 +50,7 @@ sub derive_savepath_from_payload {
                     want_len   => $len,
                     hit_size   => '',
                     hit_any    => '',
+                    hit_vol    => '',
                     savepath   => '',
                     verify     => [], );
 
@@ -59,27 +64,83 @@ sub derive_savepath_from_payload {
       $attempt{hit_any} = $hit // '';
     }
 
-    unless ( $hit && -f $hit ) {
+    # --- NEW: distinguish "no hit" vs "hit but volume missing / stale" ---
+    if ( $hit ) {
+      my $v = eval { QBTL::Utils::vol_from_path( $hit ) } // '';
+      $attempt{hit_vol} = $v if length $v;
+
+      if ( length( $v ) && !$mounted->{$v} ) {
+        $attempt{reject} = "volume_missing:$v";
+        $push_dbg->( \%attempt );
+
+        QBTL::Classify::classify_volume_missing(
+             $app,
+             {
+              ih          => $ih,
+              name        => ( $rec->{name}        // '' ),
+              bucket      => ( $rec->{bucket}      // '' ),
+              tracker     => ( $rec->{tracker}     // '' ),
+              source_path => ( $rec->{source_path} // '' ),
+              total_size  => ( $rec->{total_size}  // 0 ),
+              files => ( ref( $rec->{files} ) eq 'ARRAY' ? $rec->{files} : [] ),
+              hit_path => $hit,
+              volume   => $v,
+             },
+             'volume missing during payload locate' );
+
+        next;    # try next anchor (another file might live on a mounted volume)
+      }
+    }
+
+    #  no usable hit path
+   unless ( $hit && -f $hit ) {
       $attempt{reject} = "no_hit";
       $push_dbg->( \%attempt );
 
-      # Preserve instead of vaporize
+      # If Spotlight gave us *a path*, but the volume is unmounted,
+      # classify as VOLUME_MISSING instead of NO_HITS.
+      if ( $hit ) {
+        my $mounted = QBTL::Utils::mounted_vols_map();
+        $mounted = {} if ref($mounted) ne 'HASH';
+
+        my $vol = QBTL::Utils::vol_from_path($hit);
+        if ( length($vol) && !$mounted->{$vol} ) {
+          QBTL::Classify::classify_volume_missing(
+            $app,
+            {
+              ih          => $ih,
+              name        => ( $rec->{name}        // '' ),
+              bucket      => ( $rec->{bucket}      // '' ),
+              tracker     => ( $rec->{tracker}     // '' ),
+              source_path => ( $rec->{source_path} // '' ),
+              total_size  => ( $rec->{total_size}  // 0 ),
+              files       => ( ref($rec->{files}) eq 'ARRAY' ? $rec->{files} : [] ),
+
+              vol      => $vol,
+              hit_path => $hit,
+              leaf     => $leaf,
+            },
+            "volume missing: $vol"
+          );
+
+          next;
+        }
+      }
+
+      # Default: true NO_HITS
       QBTL::Classify::classify_no_hits(
-                                        $app,
-                                        {
-                                         ih     => $ih,
-                                         name   => ( $attempt{name}   // '' ),
-                                         bucket => ( $attempt{bucket} // '' ),
-                                         source_path => (
-                                                     $attempt{source_path} // ''
-                                         ),
-                                         total_size => (
-                                                       $attempt{total_size} // 0
-                                         ),
-                                         files   => ( $attempt{files}   // [] ),
-                                         tracker => ( $attempt{tracker} // '' ),
-                                        },
-                                        'no_hit: payload not found' );
+        $app,
+        {
+          ih          => $ih,
+          name        => ( $rec->{name}        // '' ),
+          bucket      => ( $rec->{bucket}      // '' ),
+          tracker     => ( $rec->{tracker}     // '' ),
+          source_path => ( $rec->{source_path} // '' ),
+          total_size  => ( $rec->{total_size}  // 0 ),
+          files       => ( ref($rec->{files}) eq 'ARRAY' ? $rec->{files} : [] ),
+        },
+        'no_hit: payload not found'
+      );
 
       next;
     }

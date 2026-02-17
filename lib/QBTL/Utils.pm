@@ -176,6 +176,42 @@ sub prefix_dbg {
   return ( basename( $fn ) . ":" . $line );
 }
 
+sub vol_from_path {
+  my ( $path ) = @_;
+  return '' unless defined $path && length $path;
+
+  # /Volumes/<VOL>/...
+  if ( $path =~ m{\A/Volumes/([^/]+)} ) {
+    return $1;
+  }
+  return '';    # system / not a removable volume path
+}
+
+sub mounted_vols_map {
+  my %m;
+
+  # authoritative: `mount` output
+  my $out = `mount 2>/dev/null` // '';
+  for my $ln ( split /\n/, $out ) {
+
+    # e.g. "/dev/disk9s2 on /Volumes/Red (hfs, ...)"
+    if ( $ln =~ m{\son\s(/Volumes/.*?)(?:\s\(|\z)} ) {
+      my $mp = $1;
+      if ( $mp =~ m{\A/Volumes/(.+)\z} ) {
+        $m{$1} = 1;
+      }
+    }
+  }
+
+  return \%m;
+}
+
+sub mounts_fingerprint {
+  my ( $mounted ) = @_;
+  $mounted ||= {};
+  return join "\n", sort keys %$mounted;    # stable fingerprint
+}
+
 # ---------------------------
 # Time and timers
 # ---------------------------

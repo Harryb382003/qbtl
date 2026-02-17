@@ -1,0 +1,83 @@
+% layout 'main';
+% title 'QBTL - No Payload';
+
+<h1>No Payload</h1>
+
+<p>
+  Total: <%= $found_total %>
+  &nbsp;|&nbsp; No_Hits: <%= $found_hits %>
+  &nbsp;|&nbsp; Volume_Missing: <%= $found_vols %>
+</p>
+
+<form method="post" action="/qbt/no_payload/clear" style="margin: 8px 0 16px 0;">
+  <button type="submit">Clear No Payload</button>
+</form>
+
+<h2>No_Hits</h2>
+
+% if (!@$no_hits) {
+  <p>(none)</p>
+% } else {
+  <table class="table">
+    <tr>
+      <th>ih</th>
+      <th>name</th>
+      <th>source_path</th>
+      <th>why</th>
+    </tr>
+    % for my $r (@$no_hits) {
+      <tr>
+        <td><code><%= $r->{ih} // '' %></code></td>
+        <td><%= $r->{name} // '' %></td>
+        <td><%= $r->{source_path} // '' %></td>
+        <td><%= $r->{why} // '' %></td>
+      </tr>
+    % }
+  </table>
+% }
+
+<hr style="margin: 18px 0;">
+
+<h2>Volume_Missing</h2>
+
+% if (!@$vol_missing) {
+  <p>(none)</p>
+% } else {
+  <table class="table">
+    <tr>
+      <th>ih</th>
+      <th>vol</th>
+      <th>hit_path</th>
+      <th>source_path</th>
+      <th>why</th>
+    </tr>
+    % for my $r (@$vol_missing) {
+      <tr>
+        <td><code><%= $r->{ih} // '' %></code></td>
+        <td><%= $r->{vol} // '' %></td>
+        <td><%= $r->{hit_path} // '' %></td>
+        <td><%= $r->{source_path} // '' %></td>
+        <td><%= $r->{why} // '' %></td>
+      </tr>
+    % }
+  </table>
+% }
+
+% if (@$other) {
+  <hr style="margin: 18px 0;">
+  <h2>Other</h2>
+  <table class="table">
+    <tr>
+      <th>ih</th>
+      <th>subclass</th>
+      <th>why</th>
+    </tr>
+    % for my $r (@$other) {
+      <tr>
+        <td><code><%= $r->{ih} // '' %></code></td>
+        <td><%= $r->{subclass} // '' %></td>
+        <td><%= $r->{why} // '' %></td>
+      </tr>
+    % }
+  </table>
+% }

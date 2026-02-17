@@ -10,6 +10,8 @@ use Exporter 'import';
 our @EXPORT_OK = qw(
     classify_no_hits
     classify_triage
+    classify_volume_missing
+
 );
 
 # Centralized, in-memory classification store:
@@ -29,18 +31,21 @@ sub classify_no_hits {
   my $ih = $rec->{ih} // '';
   return 0 unless $ih =~ /^[0-9a-f]{40}$/;
 
-  _ensure_class_bucket( $app, 'NO_HITS' );
+  _ensure_class_bucket( $app, 'NO_PAYLOAD' );
 
-  $app->defaults->{classes}{NO_HITS}{$ih} = {
-                                             %$rec,
-                                             ts  => time,
-                                             why => ( $why // 'no_hit' ),};
+  $app->defaults->{classes}{NO_PAYLOAD}{$ih} = {
+    %$rec,
+    ts       => time,
+    why      => ( $why // 'no_hit' ),
+    subclass => 'NO_HITS',
+  };
 
-# Optional: treat NO_HITS as “processed” for this run so it vanishes from Page_View
+  # Optional: treat NO_PAYLOAD as “processed” for this run so it vanishes from Page_View
   _mark_processed(
-                   $app, $ih,
-                   status => 'no_hits',
-                   why    => ( $why // 'no_hit' ) );
+    $app, $ih,
+    status => 'no_payload',
+    why    => ( $why // 'no_hit' ),
+  );
 
   return 1;
 }
@@ -50,76 +55,59 @@ sub classify_triage {
   return 0 unless $app && ref( $rec ) eq 'HASH';
 
   my $ih     = $rec->{ih} // '';
-  my $has_ih = ( defined( $ih ) && $ih =~ /^[0-9a-f]{40}$/ ) ? 1 : 0;
+  my $has_ih = ( defined($ih) && $ih =~ /^[0-9a-f]{40}$/ ) ? 1 : 0;
 
   # Hard rule: triage is keyed by ih. If missing -> caller bug bucket.
   if ( !$has_ih ) {
-    _ensure_class_bucket( $app, 'TRIAGE_BUG' );
+    my $bug = _ensure_class_bucket_path( $app, qw(TRIAGE_BUG) );
 
-    my $id = join '-', time, $$, int( rand( 1_000_000 ) );
+    my $id = join '-', time, $$, int( rand(1_000_000) );
 
-    $app->defaults->{classes}{TRIAGE_BUG}{$id} = {
-                                                  %$rec,
-                                                  ts  => time,
-                                                  why => ( $why // 'triage' ),
-                                                  bug => 'missing_ih',};
+    $bug->{$id} = {
+      %$rec,
+      ts  => time,
+      why => ( $why // 'triage' ),
+      bug => 'missing_ih',
+    };
 
-    $app->log->error(   prefix_dbg()
-                      . " TRIAGE_BUG missing ih (caller lost key) id=$id why=["
-                      . ( $why // '' )
-                      . "] key=["
-                      . ( $rec->{key} // '' ) . "]"
-                      . " path=["
-                      . ( $rec->{path} // '' )
-                      . "]" );
+    $app->log->error(
+      prefix_dbg()
+        . " TRIAGE_BUG missing ih (caller lost key) id=$id why=["
+        . ( $why // '' )
+        . "] key=["
+        . ( $rec->{key} // '' )
+        . "] path=["
+        . ( $rec->{path} // '' )
+        . "]"
+    );
 
-    return 0;    # make it loud: caller can see it didn't "triage" properly
+    return 0;
   }
 
-  _ensure_class_bucket( $app, 'TRIAGE' );
+  my $h = _ensure_class_bucket_path( $app, qw(TRIAGE) );
 
   my $id = $ih;
 
-  $app->defaults->{classes}{TRIAGE}{$id} = {
-                                            %$rec,
-                                            ts  => time,
-                                            why => ( $why // 'triage' ),};
-
-  _mark_processed(
-                   $app, $ih,
-                   status => ( $opt{status} // 'triage' ),
-                   why    => ( $why         // 'triage' ), );
-
-  $app->log->debug(   prefix_dbg()
-                    . " TRIAGE add ih="
-                    . short_ih( $ih )
-                    . " why=["
-                    . ( $why // '' )
-                    . "]" );
-
-  return 1;
-}
-
-sub classify_zero_bytes {
-  my ( $app, $rec, $why ) = @_;
-  return 0 unless $app && ref( $rec ) eq 'HASH';
-
-  my $ih = $rec->{ih} // '';
-  return 0 unless $ih =~ /^[0-9a-f]{40}$/;
-
-  _ensure_class_bucket( $app, 'ZERO_BYTES' );
-
-  $app->defaults->{classes}{ZERO_BYTES}{$ih} = {
-                                                %$rec,
-                                                ts  => time,
-                                                why => ( $why // 'zero_bytes' ),
+  $h->{$id} = {
+    %$rec,
+    ts  => time,
+    why => ( $why // 'triage' ),
   };
 
-  # optional: treat as processed so it vanishes from Page_View this run
   _mark_processed(
-                   $app, $ih,
-                   status => 'zero_bytes',
-                   why    => ( $why // 'zero_bytes' ) );
+    $app, $ih,
+    status => ( $opt{status} // 'triage' ),
+    why    => ( $why         // 'triage' ),
+  );
+
+  $app->log->debug(
+    prefix_dbg()
+      . " TRIAGE add ih="
+      . short_ih($ih)
+      . " why=["
+      . ( $why // '' )
+      . "]"
+  );
 
   return 1;
 }
@@ -148,6 +136,56 @@ sub classify_qbt_default_path {
   return 1;
 }
 
+
+sub classify_volume_missing {
+  my ( $app, $rec, $why ) = @_;
+  return 0 unless $app && ref( $rec ) eq 'HASH';
+
+  my $ih = $rec->{ih} // '';
+  return 0 unless $ih =~ /^[0-9a-f]{40}$/;
+
+  _ensure_class_bucket( $app, 'NO_PAYLOAD' );
+
+  $app->defaults->{classes}{NO_PAYLOAD}{$ih} = {
+    %$rec,
+    ts       => time,
+    why      => ( $why // 'volume_missing' ),
+    subclass => 'VOLUME_MISSING',
+  };
+
+  _mark_processed(
+    $app, $ih,
+    status => 'no_payload',
+    why    => ( $why // 'volume_missing' ),
+  );
+
+  return 1;
+}
+
+sub classify_zero_bytes {
+  my ( $app, $rec, $why ) = @_;
+  return 0 unless $app && ref( $rec ) eq 'HASH';
+
+  my $ih = $rec->{ih} // '';
+  return 0 unless $ih =~ /^[0-9a-f]{40}$/;
+
+  _ensure_class_bucket( $app, 'ZERO_BYTES' );
+
+  $app->defaults->{classes}{ZERO_BYTES}{$ih} = {
+                                                %$rec,
+                                                ts  => time,
+                                                why => ( $why // 'zero_bytes' ),
+  };
+
+  # optional: treat as processed so it vanishes from Page_View this run
+  _mark_processed(
+                   $app, $ih,
+                   status => 'zero_bytes',
+                   why    => ( $why // 'zero_bytes' ) );
+
+  return 1;
+}
+
 # --------------------------
 # Helpers (private)
 # --------------------------
@@ -159,6 +197,20 @@ sub _ensure_class_bucket {
   return 1;
 }
 
+sub _ensure_class_bucket_path {
+  my ( $app, @path ) = @_;
+  $app->defaults->{classes} ||= {};
+
+  my $h = $app->defaults->{classes};
+  for my $k (@path) {
+    $h->{$k} ||= {};
+    $h = $h->{$k};
+    $h = {} if ref($h) ne 'HASH'; # harden: if someone stomped it, reset
+  }
+
+  return $h;
+}
+
 sub _mark_processed {
   my ( $app, $ih, %meta ) = @_;
   return 0 unless $ih && $ih =~ /^[0-9a-f]{40}$/;
@@ -167,9 +219,10 @@ sub _mark_processed {
   $app->defaults->{runtime}{processed} ||= {};
 
   $app->defaults->{runtime}{processed}{$ih} = {
-                                     ts     => time,
-                                     status => ( $meta{status} // 'processed' ),
-                                     why    => ( $meta{why}    // '' ),};
+    ts     => time,
+    status => ( $meta{status} // 'processed' ),
+    why    => ( $meta{why}    // '' ),
+  };
 
   return 1;
 }

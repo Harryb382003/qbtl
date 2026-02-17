@@ -88,65 +88,75 @@ sub qbt_echo {
   my ( $app, %opt ) = @_;
   my $want_api = $opt{want_api} ? 1 : 0;
 
-  #   $app->log->debug( prefix_dbg() . " want_api: " . $want_api );
-
   my $out = {
-             pid      => 0,
-             api_ok   => 0,
-             api_ts   => 0,
-             echo_ts  => time,
-             echo_err => '',};
+    pid      => 0,
+    qbt_up   => 0,        # explicit proc status
+    want_api => $want_api,# echoes whether we probed
+    api_ok   => 0,
+    api_ts   => 0,        # "API status known" only if we set this
+    echo_ts  => time,
+    echo_err => '',
+  };
 
   my $pid = _find_qbt_pid();
   $out->{pid} = $pid;
 
   unless ( $pid ) {
     $out->{echo_err} = 'qbt not running';
-    $app->log->debug(   prefix_dbg()
-                      . $out->{echo_err}
-                      . " want_api: "
-                      . $want_api
-                      . " pid: "
-                      . $out->{pid} );
+    $app->log->debug(
+      prefix_dbg()
+        . $out->{echo_err}
+        . " want_api: $want_api pid: " . ( $out->{pid} || 0 )
+    );
     return $out;
   }
 
-  # 🚦 HARD GATE — do NOT touch API unless explicitly asked
+  $out->{qbt_up} = 1;
 
+  # 🚦 HARD GATE — do NOT touch API unless explicitly asked
   return $out unless $want_api;
 
   # ---- API probe (tight timeout) ----
+  $out->{api_ts} = time;   # mark "known" once we attempt probe
+
   my $ok = eval {
     local $SIG{ALRM} = sub { die "api timeout\n" };
     alarm 2;
-    my $qbt = QBTL::QBT->new( {timeout => 2} );
+
+    my $qbt = QBTL::QBT->new( { timeout => 2 } );
     $qbt->api_qbt_login();
+
     alarm 0;
     1;
   };
+
   if ( $ok ) {
     $out->{api_ok} = 1;
+    $out->{echo_err} = '';
   }
   else {
+    $out->{api_ok} = 0;
     $out->{echo_err} = $@ || 'api probe failed';
+    $out->{echo_err} =~ s/\s+\z//;
   }
 
-  #   $out->{qbt_up} = 1;
-  $out->{pid} = $pid;
-  $app->log->debug(   prefix_dbg()
-                    . $out->{echo_err}
-                    . " want_api: "
-                    . $want_api
-                    . " pid: "
-                    . $out->{pid} );
+  $app->log->debug(
+    prefix_dbg()
+      . ( length($out->{echo_err}) ? $out->{echo_err} : 'api ok' )
+      . " want_api: $want_api pid: " . ( $out->{pid} || 0 )
+  );
+
   return $out;
 }
 
+
+
 # ------------------------------
+#
 # qBittorrent application level methods
 # /api/v2/app/
-# referred to as api_qbt_<function> to not confuse it with $app-> stuff leter
-
+# referred to as api_qbt_<function> to not confuse it with $app-> stuff later
+#
 # ------------------------------
 sub api_app_preferences {
   my ( $self ) = @_;

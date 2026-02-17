@@ -7,29 +7,30 @@
   <style>
     .navbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:8px 0;}
     .navbar form{margin:0;}
+
     /* QBT status indicators */
-      .qbt-indicator {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 6px 10px;
-        border: 1px solid #ddd;
-        border-radius: 10px;
-        font-size: 14px;
-        line-height: 1;
-        white-space: nowrap;
-      }
-      .dot {
-        width: 10px;
-        height: 10px;
-        border-radius: 999px;
-        display: inline-block;
-        border: 1px solid rgba(0,0,0,.2);
-      }
-      .dot--green  { background: #2ecc71; }
-      .dot--yellow { background: #f1c40f; }
-      .dot--red    { background: #e74c3c; }
-      .qbt-msg { opacity: .85; font-size: 12px; }
+    .qbt-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      font-size: 14px;
+      line-height: 1;
+      white-space: nowrap;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      display: inline-block;
+      border: 1px solid rgba(0,0,0,.2);
+    }
+    .dot--green  { background: #2ecc71; }
+    .dot--yellow { background: #f1c40f; }
+    .dot--red    { background: #e74c3c; }
+    .qbt-msg { opacity: .85; font-size: 12px; }
 
     /* Uniform-height "buttons" for both links and real buttons */
     .navbtn{
@@ -49,11 +50,6 @@
       box-sizing:border-box;
       user-select:none;
     }
-    .nav-notice {
-      margin-left: 1em;
-      color: #c00;
-      font-weight: bold;
-    }
     a.navbtn:hover, button.navbtn:hover{background:#ececec;}
     button.navbtn{appearance:none;-webkit-appearance:none;}
 
@@ -61,73 +57,82 @@
     .navbtn small{font-size:0.8em;opacity:0.8;}
 
     .notice{padding:8px 10px;border:1px solid #f3c15a;background:#fff7e0;border-radius:6px;}
+    .nav-notice{padding:6px 10px;border:1px solid #c9d7ff;background:#eef3ff;border-radius:6px;}
   </style>
 </head>
 <body>
   <div class="navbar">
-      % my ($dot_class, $dot_label, $msg);
-      % my $ts        = stash('local_cache_mtime') // app->defaults->{local_cache_mtime} // 0;
-      % my $nav_label = $ts ? scalar(localtime($ts)) : 'never';
-      % my $qh        = app->defaults->{health}{qbt} || {};
-      % my $proc_up   = $qh->{pid} ? 1 : 0;
-      % my $api_ok    = (defined $qh->{api_ok} && $qh->{api_ok}) ? 1 : 0;
-      % my $api_known = $qh->{api_ts} ? 1 : 0;
-      % my $err       = $qh->{echo_err} // '';
+    % my $qh = app->defaults->{health}{qbt} || {};
 
-      % if ( !$proc_up ) {
-      %   $dot_class = 'dot--red';
-      %   $dot_label = 'qbt down';
-      %   $msg = 'not running';
-      % } elsif ( $api_known && !$api_ok ) {
-      %   $dot_class = 'dot--yellow';
-      %   $dot_label = 'qbt degraded';
-      %   $msg = length($err) ? $err : 'qbt not responding';
-      % } else {
-      %   $dot_class = 'dot--green';
-      %   $dot_label = 'qbt ok';
-      %   $msg = '';
+    % my $proc_up   = $qh->{qbt_up} ? 1 : 0;
+    % my $api_known = $qh->{want_api} ? 1 : 0;  # only true if we actually probed
+    % my $api_ok    = $qh->{api_ok} ? 1 : 0;
+    % my $err       = $qh->{echo_err} // '';
+
+    % my ($dot_class, $dot_label, $msg);
+
+    % if ( !$proc_up ) {
+    %   $dot_class = 'dot--red';
+    %   $dot_label = 'qbt down';
+    %   $msg = length($err) ? $err : 'not running';
+    % } elsif ( $api_known && !$api_ok ) {
+    %   $dot_class = 'dot--yellow';
+    %   $dot_label = 'qbt degraded';
+    %   $msg = length($err) ? $err : 'qbt not responding';
+    % } else {
+    %   $dot_class = 'dot--green';
+    %   $dot_label = $api_known ? 'qbt ok' : 'qbt up';
+    %   $msg = '';
+    % }
+
+    <div class="qbt-indicator" title="<%= $msg %>">
+      <span class="dot <%= $dot_class %>"></span>
+      <span><%= $dot_label %></span>
+      % if (length $msg) {
+        <span class="qbt-msg"><%= $msg %></span>
       % }
+    </div>
 
-      <div class="qbt-indicator" title="<%= $msg %>">
-        <span class="dot <%= $dot_class %>"></span>
-        <span><%= $dot_label %></span>
-        % if (length $msg) {
-          <span class="qbt-msg"><%= $msg %></span>
-        % }
-      </div>
     <a class="navbtn" href="/">Home</a>
     <a class="navbtn" href="/qbt/hashnames">QBT hash-names</a>
     <a class="navbtn" href="/qbt/repairable">Repairable</a>
     <a class="navbtn" href="/qbt/triage">Triage</a>
     <a class="navbtn" href="/torrents">Page View</a>
     <a class="navbtn" href="/qbt/add_one">Single View</a>
-    <a class="navbtn" href="/qbt/no_hits">No Hits</a>
+    <a class="navbtn" href="/qbt/no_payload">No Payload</a>
 
-    % if (app->defaults->{local_cache}{rebuilding}) {
-        <span class="nav-notice">Rebuilding local cache…</span>
+    % # Localcache rebuild status (canonical: defaults->{localcache_rebuild}{inflight})
+    % my $lc = app->defaults->{localcache_rebuild} || {};
+    % if (ref($lc) eq 'HASH' && $lc->{inflight}) {
+      % my $dt = ($lc->{started_ts} && $lc->{started_ts} =~ /^\d+$/) ? (time - $lc->{started_ts}) : '';
+      <div class="nav-notice">Rebuilding local cache…<%= length($dt) ? " (${dt}s)" : "" %></div>
     % }
+
     % if (stash('dev_mode')) {
       % my $notice = stash('notice') // flash('notice');
       % if ($notice) {
         <div class="notice"><%= $notice %></div>
       % }
 
-       <form method="post" action="/localcache/rebuild">
-         <input type="hidden" name="tok" value="<%= stash('rebuild_tok') // '' %>">
-         <button class="navbtn navbtn--wide" type="submit">Rebuild Cache<br>
-           <small>Last: <%= $nav_label %></small>
-         </button>
-       </form>
+      % my $ts        = stash('local_cache_mtime') // app->defaults->{local_cache_mtime} // 0;
+      % my $nav_label = $ts ? scalar(localtime($ts)) : 'never';
 
-       <form method="post" action="/tasks/poll">
-         <button class="navbtn navbtn--wide" type="submit">Poll recheck → maybe resume</button>
-       </form>
+      % # token: prefer stash, fall back to session (layout used by many pages)
+      % my $tok = stash('rebuild_tok');
+      % $tok = session('rebuild_tok') unless defined($tok) && length($tok);
 
-       <form method="post" action="/restart">
-         <button class="navbtn" type="submit">Restart server (dev)</button>
-       </form>
+      <form method="post" action="/localcache/rebuild">
+        <input type="hidden" name="tok" value="<%= $tok // '' %>">
+        <button class="navbtn navbtn--wide" type="submit">Rebuild Cache<br>
+          <small>Last: <%= $nav_label %></small>
+        </button>
+      </form>
+
+      <form method="post" action="/restart">
+        <button class="navbtn" type="submit">Restart server (dev)</button>
+      </form>
     % }
-   </div>
+  </div>
 
   <hr />
 

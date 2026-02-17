@@ -28,20 +28,40 @@ sub register_routes {
 
   $r->get(
     '/localcache/rebuild' => sub {
-      $app->log->debug( prefix_dbg() . "" );
       my $c = shift;
 
-      my $tok =
-          md5_sum( join '|', time, $$, rand(), $c->tx->remote_address // '' );
-      $c->session( rebuild_tok => $tok );
+      $c->stash( dev_mode => ( $opts->{dev_mode} ? 1 : 0 ) );
+
+      my $tok = $c->session( 'rebuild_tok' ) // '';
+      if ( !length $tok ) {
+        $tok = md5_sum( join '|', time, $$, rand(),
+                        ( $c->tx->remote_address // '' ) );
+        $c->session( rebuild_tok => $tok );
+      }
 
       $c->stash( rebuild_tok => $tok );
+
+      $c->app->log->debug(   prefix_dbg()
+                           . " GET /localcache/rebuild tok="
+                           . ( length( $tok ) ? "set" : "EMPTY" ) );
       return $c->render( template => 'localcache_rebuild' );
     } );
 
   $r->post(
     '/localcache/rebuild' => sub {
-      my $c = shift;
+      my $c   = shift;
+      my $app = $c->app;
+
+      my $root = $app->defaults->{root_dir} || '.';
+
+      $app->defaults->{localcache_rebuild} ||= {};
+      my $st = $app->defaults->{localcache_rebuild};
+
+      # inflight guard first (this is the real protection)
+      if ( $st->{inflight} ) {
+        $c->flash( notice => "Rebuild already in progress…" );
+        return $c->redirect_to( '/localcache/rebuild' );
+      }
 
       my $tok  = $c->param( 'tok' )           // '';
       my $want = $c->session( 'rebuild_tok' ) // '';
@@ -52,38 +72,26 @@ sub register_routes {
         return $c->redirect_to( '/localcache/rebuild' );
       }
 
-      # consume token
+      # consume token (prevents POST replay from browser back/refresh)
       delete $c->session->{rebuild_tok};
 
-      my $app  = $c->app;
-      my $root = $app->defaults->{root_dir} || '.';
-
-      $app->defaults->{localcache_rebuild} ||= {};
-      my $st = $app->defaults->{localcache_rebuild};
-
-      # inflight guard (prevents actual re-runs even if browser retries POST)
-      if ( $st->{inflight} ) {
-        $c->flash( notice => "Rebuild already in progress…" );
-        return $c->redirect_to( '/localcache/rebuild' );
-      }
-
+      # initialize state
       $st->{inflight}    = 1;
       $st->{started_ts}  = time;
-      $st->{done_logged} = 0;
       $st->{done_ts}     = 0;
       $st->{last_err}    = '';
       $st->{pid}         = $$;
+      $st->{done_logged} = 0;
 
-      delete $st->{done_logged};
       delete $st->{heartbeat_ts};
 
-      $app->log->debug(
-                 prefix_dbg() . " localcache rebuild START inflight=1 pid=$$" );
+      $app->log->debug( prefix_dbg()
+                   . " localcache rebuild START inflight=1 pid=$$ root=$root" );
 
-      # Run rebuild off-request
       Mojo::IOLoop->subprocess(
         sub {
-          # child (DO NOT touch $app in here)
+          # child (forked): build + write cache files
+          # NOTE: In a fork, $app exists, but avoid doing web/router stuff here.
           QBTL::LocalCache::build_local_by_ih(
                                              $app,
                                              root_dir   => $root,
@@ -109,7 +117,7 @@ sub register_routes {
           }
         } );
 
-      # IMPORTANT: return immediately so browser doesn't retry
+      # return immediately so browser doesn't retry the POST
       $c->flash( notice => "Rebuilding local cache…" );
       return $c->redirect_to( '/localcache/rebuild' );
     } );
@@ -483,6 +491,7 @@ sub register_routes {
 
       return;
     } );
+
   $r->post(
     '/queue/clear' => sub {
       my $c = shift;

@@ -75,6 +75,25 @@ sub app {
     before_dispatch => sub {
       my $c = shift;
 
+      # --- CONFIRM MOUNT POINTS
+      $c->app->defaults->{runtime} ||= {};
+      my $rt = $c->app->defaults->{runtime};
+
+      my $mounted = QBTL::Utils::mounted_vols_map();
+      my $fp      = QBTL::Utils::mounts_fingerprint( $mounted );
+
+      my $prev_fp = $rt->{mounts_fp} // '';
+      $rt->{mounts} ||= {};
+      $rt->{mounts}{ts}      = time;
+      $rt->{mounts}{mounted} = $mounted;
+      $rt->{mounts_fp}       = $fp;
+
+      # if mounts changed, auto-clear ignore_all
+      if ( length( $prev_fp ) && $prev_fp ne $fp ) {
+        $rt->{ignore_unmounted_all} = 0;
+        $rt->{mounts_changed_ts}    = time;
+      }
+
       # --- QBT HEALTH (cheap every request; API only when needed+stale) ---
       $c->app->defaults->{health} ||= {};
 
@@ -193,7 +212,7 @@ sub app {
   if ( $opts->{dev_mode} ) {
     require QBTL::Devel;
     QBTL::Devel::register_routes( $app, $opts );    # <-- IMPORTANT
-    $app->log->debug( prefix_dbg() . " Developer routes registered" );
+    $app->log->debug( prefix_dbg() . " DEVELOPER ROUTES REGISTERED" );
   }
 
   $r->get(
@@ -720,7 +739,34 @@ sub app {
       my $sz = ( -e $source_path ) ? ( -s $source_path ) : 0;
 
       $app->log->debug( prefix_dbg() . " SOURCE_PATH: $source_path\n " );
+      my $rt = $c->app->defaults->{runtime} || {};
+      my $mounted =
+          ( $rt->{mounts} && ref( $rt->{mounts}{mounted} ) eq 'HASH' )
+          ? $rt->{mounts}{mounted}
+          : {};
 
+      my $v_torrent = QBTL::Utils::vol_from_path( $source_path );
+      if ( length( $v_torrent ) && !$mounted->{$v_torrent} ) {
+        my $err =
+            "Torrent volume not mounted: $v_torrent (source_path=$source_path)";
+        _add_one_mark_fail( $c->app, $ih, $err );
+        classify_triage(
+                         $c->app,
+                         {
+                          ih          => $ih,
+                          key         => 'missing_mount_torrent',
+                          path        => '/qbt/add_one',
+                          err         => $err,
+                          source_path => $source_path
+                         },
+                         'missing_mount' );
+        _add_one_remove_ih( $c->app, $ih );
+        return
+            $c->render(
+                        template => 'qbt_add_one',
+                        error    => $err,
+                        picked   => {ih => $ih, source_path => $source_path} );
+      }
       my $ih_file = eval { _infohash_from_torrent_file( $app, $source_path ) };
       $ih_file = $@ ? "(ih parse failed: $@)" : $ih_file;
 
@@ -881,7 +927,30 @@ sub app {
             $rec->{pending_root_rename_data} = $pending_root_rename_data;
           }
         }
-
+        my $v_payload = QBTL::Utils::vol_from_path( $savepath );
+        if ( length( $v_payload ) && !$mounted->{$v_payload} ) {
+          my $err =
+              "Payload volume not mounted: $v_payload (savepath=$savepath)";
+          _add_one_mark_fail( $c->app, $ih, $err );
+          classify_triage(
+                           $c->app,
+                           {
+                            ih          => $ih,
+                            key         => 'missing_mount_payload',
+                            path        => '/qbt/add_one',
+                            err         => $err,
+                            source_path => $source_path,
+                            savepath    => $savepath
+                           },
+                           'missing_mount' );
+          _add_one_remove_ih( $c->app, $ih );
+          return
+              $c->render(
+                          template => 'qbt_add_one',
+                          error    => $err,
+                          picked   => {ih => $ih, source_path => $source_path}
+              );
+        }
         $app->log->debug(
                   prefix_dbg()
                 . " savepath_final: $savepath "
@@ -1110,24 +1179,70 @@ sub app {
       return $c->render( template => 'qbt_hashnames' );
     } );
 
-  $r->get(
-    '/qbt/no_hits' => sub {
-      my $c = shift;
+$r->get(
+  '/qbt/no_payload' => sub {
+    my $c = shift;
 
-      my $h = $c->app->defaults->{classes}{NO_HITS};
-      $h = {} if ref( $h ) ne 'HASH';
+    my $h = $c->app->defaults->{classes}{NO_PAYLOAD};
+    $h = {} if ref($h) ne 'HASH';
 
-      # Sort newest-first (or flip comparator if you want oldest-first)
-      my @keys =
-          sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) }
-          keys %$h;    # newest first
+    # newest first
+    my @keys =
+      sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) }
+      keys %$h;
 
-      my @rows = map { $h->{$_} } @keys;
+    my @rows = map {
+      my $r = $h->{$_};
+      $r = {} if ref($r) ne 'HASH';
+      +{
+        ih        => ( $r->{ih} // $_ ),
+        subclass  => ( $r->{subclass} // '' ),
+        ts        => ( $r->{ts} // 0 ),
+        why       => ( $r->{why} // '' ),
 
-      $c->stash( found => scalar( @rows ),
-                 rows  => \@rows, );
-      return $c->render( template => 'qbt_no_hits' );
-    } );
+        name        => ( $r->{name} // '' ),
+        bucket      => ( $r->{bucket} // '' ),
+        tracker     => ( $r->{tracker} // '' ),
+        source_path => ( $r->{source_path} // '' ),
+        total_size  => ( $r->{total_size} // 0 ),
+
+        vol      => ( $r->{vol} // '' ),
+        hit_path => ( $r->{hit_path} // '' ),
+        leaf     => ( $r->{leaf} // '' ),
+      }
+    } @keys;
+
+    my @no_hits   = grep { ( $_->{subclass} // '' ) eq 'NO_HITS' } @rows;
+    my @vol_miss  = grep { ( $_->{subclass} // '' ) eq 'VOLUME_MISSING' } @rows;
+    my @other     = grep {
+                     my $s = ( $_->{subclass} // '' );
+                     $s ne 'NO_HITS' && $s ne 'VOLUME_MISSING'
+                   } @rows;
+
+    $c->stash(
+      found_total => scalar(@rows),
+      found_hits  => scalar(@no_hits),
+      found_vols  => scalar(@vol_miss),
+
+      no_hits      => \@no_hits,
+      vol_missing  => \@vol_miss,
+      other        => \@other,
+    );
+
+    return $c->render( template => 'qbt_no_payload' );
+  }
+);
+
+# Optional: one clean clear endpoint (no redirects, no legacy names)
+$r->post(
+  '/qbt/no_payload/clear' => sub {
+    my $c = shift;
+    $c->app->defaults->{classes} ||= {};
+    $c->app->defaults->{classes}{NO_PAYLOAD} = {};
+    $c->flash( notice => "Cleared NO_PAYLOAD." );
+    return $c->redirect_to('/qbt/no_payload');
+  }
+);
 
   $r->post(
     '/qbt/refresh_no_hits' => sub {
@@ -1169,9 +1284,9 @@ sub app {
 
 # ---------- Classes overlay (NO_HITS should disappear from Page_View list) ----------
      $c->app->defaults->{classes} ||= {};
-     $c->app->defaults->{classes}{NO_HITS} ||= {};
-     my $no_hits = $c->app->defaults->{classes}{NO_HITS};
-     $no_hits = {} if ref( $no_hits ) ne 'HASH';
+     $c->app->defaults->{classes}{NO_PAYLOAD} ||= {};
+     my $no_payload = $c->app->defaults->{classes}{NO_PAYLOAD};
+     $no_payload = {} if ref( $no_payload ) ne 'HASH';
 
      # ---------- Load local cache ----------
      my ( $local_by_ih, $mtime, $src ) =
@@ -1210,10 +1325,14 @@ sub app {
      my $in_qbt      = 0;
 
      my @rows;
+     my $mounted = QBTL::Utils::mounted_vols_map();
+     $mounted = {} if ref( $mounted ) ne 'HASH';
+
+     my $ignore_all = $c->session( 'ignore_unmounted' ) ? 1 : 0;
      for my $ih ( keys %$local_by_ih ) {
        next unless defined $ih && $ih =~ /^[0-9a-f]{40}$/;
        next if exists $processed->{$ih};
-       next if exists $no_hits->{$ih};
+       next if exists $no_payload->{$ih};
 
        my $rec = $local_by_ih->{$ih};
        next unless ref( $rec ) eq 'HASH';
@@ -1225,8 +1344,14 @@ sub app {
        next      if ( $show eq 'missing' ) && $exists_in_qbt;
 
        my $source_path = $rec->{source_path} // '';
-       my $name        = $rec->{name}        // '';
-       my $files       = $rec->{files};
+       if ( $ignore_all && length $source_path ) {
+         my $v = QBTL::Utils::vol_from_path( $source_path );
+         if ( length( $v ) && !$mounted->{$v} ) {
+           next;    # <-- cull unmounted torrent volume from the user's face
+         }
+       }
+       my $name  = $rec->{name} // '';
+       my $files = $rec->{files};
 
        my $total_size = $rec->{total_size};
        $total_size = 0 if !defined $total_size;
