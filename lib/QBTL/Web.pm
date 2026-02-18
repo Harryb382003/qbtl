@@ -1062,54 +1062,91 @@ sub app {
 
   $r->get(
     '/qbt/no_payload' => sub {
-      my $c = shift;
+    my $c = shift;
 
-      my $h = $c->app->defaults->{classes}{NO_PAYLOAD};
-      $h = {} if ref( $h ) ne 'HASH';
+    my $h = $c->app->defaults->{classes}{NO_PAYLOAD};
+    $h = {} if ref($h) ne 'HASH';
 
-      # newest first
-      my @keys =
-          sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) }
-          keys %$h;
+    # newest first
+    my @keys =
+      sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) }
+      keys %$h;
 
-      my @rows = map {
-        my $r = $h->{$_};
-        $r = {} if ref( $r ) ne 'HASH';
-        +{
-          ih       => ( $r->{ih}       // $_ ),
-          subclass => ( $r->{subclass} // '' ),
-          ts       => ( $r->{ts}       // 0 ),
-          why      => ( $r->{why}      // '' ),
+    my @rows = map {
+      my $r = $h->{$_};
+      $r = {} if ref($r) ne 'HASH';
+      +{
+        ih       => ( $r->{ih}       // $_ ),
+        subclass => ( $r->{subclass} // '' ),
+        ts       => ( $r->{ts}       // 0 ),
+        why      => ( $r->{why}      // '' ),
 
-          name        => ( $r->{name}        // '' ),
-          bucket      => ( $r->{bucket}      // '' ),
-          tracker     => ( $r->{tracker}     // '' ),
-          source_path => ( $r->{source_path} // '' ),
-          total_size  => ( $r->{total_size}  // 0 ),
+        name        => ( $r->{name}        // '' ),
+        bucket      => ( $r->{bucket}      // '' ),
+        tracker     => ( $r->{tracker}     // '' ),
+        source_path => ( $r->{source_path} // '' ),
+        total_size  => ( $r->{total_size}  // 0 ),
 
-          vol      => ( $r->{vol}      // '' ),
-          hit_path => ( $r->{hit_path} // '' ),
-          leaf     => ( $r->{leaf}     // '' ),}
-      } @keys;
+        vol      => ( $r->{vol}      // '' ),
+        hit_path => ( $r->{hit_path} // '' ),
+        leaf     => ( $r->{leaf}     // '' ),
+      }
+    } @keys;
 
-      my @no_hits = grep { ( $_->{subclass} // '' ) eq 'NO_HITS' } @rows;
-      my @vol_miss =
-          grep { ( $_->{subclass} // '' ) eq 'VOLUME_MISSING' } @rows;
-      my @other = grep {
-        my $s = ( $_->{subclass} // '' );
-        $s ne 'NO_HITS' && $s ne 'VOLUME_MISSING'
-      } @rows;
+    # ---- bucket classifier (subclass wins; why is fallback) ----
+    my $bucket_of = sub {
+      my ($r) = @_;
+      my $sub = uc( $r->{subclass} // '' );
+      my $why = lc( $r->{why}      // '' );
 
-      $c->stash(
-        found_total => scalar( @rows ),
-        found_hits  => scalar( @no_hits ),
-        found_vols  => scalar( @vol_miss ),
+      return 'INTERNAL'       if $sub eq 'INTERNAL';
+      return 'NO_HITS'        if $sub eq 'NO_HITS';
+      return 'VERIFY_FAILED'  if $sub eq 'VERIFY_FAILED';
+      return 'BAD_META'       if $sub eq 'BAD_META';
+      return 'VOLUME_MISSING' if $sub eq 'VOLUME_MISSING';
 
-        no_hits     => \@no_hits,
-        vol_missing => \@vol_miss,
-        other       => \@other, );
+      # fallback by "why"
+      return 'VOLUME_MISSING' if $why =~ /\bvolume\b|\bunmount/;
+      return 'VERIFY_FAILED'  if $why =~ /\bverify\b|\broot_mismatch\b/;
+      return 'BAD_META'       if $why =~ /\bbad rec\b|\bno files\b|\bno usable anchors\b|\bmetadata\b/;
+      return 'INTERNAL'       if $why =~ /\binternal\b|\bunexpected\b|\bcaller\b|\bbug\b|\bunreachable\b/;
 
-      return $c->render( template => 'qbt_no_payload' );
+      # default: treat unknown as INTERNAL-ish (investigate)
+      return 'INTERNAL';
+    };
+
+    my %bucket;
+    for my $r (@rows) {
+      push @{ $bucket{ $bucket_of->($r) } }, $r;
+    }
+
+    # priority order requested: 5 1 3 4 2
+    my @order = qw(
+      INTERNAL
+      NO_HITS
+      VERIFY_FAILED
+      BAD_META
+      VOLUME_MISSING
+    );
+
+    my @sections;
+    for my $k (@order) {
+      my $list = $bucket{$k} || [];
+      next unless @$list;
+      push @sections, {
+        key   => $k,
+        count => scalar(@$list),
+        rows  => $list,
+      };
+    }
+
+    $c->stash(
+      sections => \@sections,
+      # optional: if you ever want a tiny nav/jump list later
+      # counts   => { map { $_ => scalar(@{ $bucket{$_} || [] }) } @order },
+    );
+
+    return $c->render( template => 'qbt_no_payload' );
     } );
 
   $r->get(    # Page_View

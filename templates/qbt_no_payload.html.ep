@@ -1,83 +1,75 @@
 % layout 'main';
-% title 'QBTL - No Payload';
+% title 'QBTL - NO_PAYLOAD';
 
-<h1>No Payload</h1>
+% my $sections = stash('sections') || [];
+% $sections = [] if ref($sections) ne 'ARRAY';
 
-<p>
-  Total: <%= $found_total %>
-  &nbsp;|&nbsp; No_Hits: <%= $found_hits %>
-  &nbsp;|&nbsp; Volume_Missing: <%= $found_vols %>
-</p>
+% my $label_for = sub {
+%   my ($k) = @_;
+%   return 'INTERNAL (investigate / code-smell)' if $k eq 'INTERNAL';
+%   return 'NO_HITS'                             if $k eq 'NO_HITS';
+%   return 'VERIFY_FAILED'                       if $k eq 'VERIFY_FAILED';
+%   return 'BAD_META'                            if $k eq 'BAD_META';
+%   return 'VOLUME_MISSING'                      if $k eq 'VOLUME_MISSING';
+%   return $k || 'UNKNOWN';
+% };
 
-<form method="post" action="/qbt/no_payload/clear" style="margin: 8px 0 16px 0;">
-  <button type="submit">Clear No Payload</button>
-</form>
+% my $back = $c->req->headers->referrer // '/torrents';
+% $back = '/torrents' if $back !~ m{\A/} || $back =~ m{://} || $back =~ m{[\r\n]};
 
-<h2>No_Hits</h2>
-
-% if (!@$no_hits) {
-  <p>(none)</p>
+% if (!@$sections) {
+  <div class="card" style="margin-top:12px;">
+    <p style="margin:0;">No records to display.</p>
+    <p style="margin:10px 0 0 0;">
+      <a href="<%= $back %>">Back</a>
+    </p>
+  </div>
 % } else {
-  <table class="table">
-    <tr>
-      <th>ih</th>
-      <th>name</th>
-      <th>source_path</th>
-      <th>why</th>
-    </tr>
-    % for my $r (@$no_hits) {
-      <tr>
-        <td><code><%= $r->{ih} // '' %></code></td>
-        <td><%= $r->{name} // '' %></td>
-        <td><%= $r->{source_path} // '' %></td>
-        <td><%= $r->{why} // '' %></td>
-      </tr>
+
+  % for my $i (0 .. $#$sections) {
+  %   my $sec  = $sections->[$i] || {};
+  %   my $k    = $sec->{key}   // '';
+  %   my $n    = $sec->{count} // 0;
+  %   my $rows = $sec->{rows}  || [];
+  %   $rows = [] if ref($rows) ne 'ARRAY';
+
+    <div class="card" style="margin-top: 12px;">
+      <div style="display:flex; align-items: baseline; justify-content: space-between;">
+        <h2 style="margin: 0;"><%= $label_for->($k) %> = <%= $n %></h2>
+      </div>
+
+      <div style="margin-top:10px; overflow-x:auto;">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>name</th>
+              <th>ih</th>
+              <th>source_path</th>
+              <th>why</th>
+            </tr>
+          </thead>
+          <tbody>
+            % for my $r (@$rows) {
+            %   $r = {} if ref($r) ne 'HASH';
+            %   my $name = $r->{name} // '';
+            %   my $ih   = $r->{ih} // '';
+            %   my $sp   = $r->{source_path} // '';
+            %   my $why  = $r->{why} // '';
+            <tr>
+              <td><%= $name %></td>
+              <td style="white-space:nowrap;"><%= $ih %></td>
+              <td><%= $sp %></td>
+              <td><%= $why %></td>
+            </tr>
+            % }
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    % if ($i < $#$sections) {
+      <hr style="margin: 16px 0; border: 0; border-top: 1px solid #333; opacity: 0.35;">
     % }
-  </table>
-% }
+  % }
 
-<hr style="margin: 18px 0;">
-
-<h2>Volume_Missing</h2>
-
-% if (!@$vol_missing) {
-  <p>(none)</p>
-% } else {
-  <table class="table">
-    <tr>
-      <th>ih</th>
-      <th>vol</th>
-      <th>hit_path</th>
-      <th>source_path</th>
-      <th>why</th>
-    </tr>
-    % for my $r (@$vol_missing) {
-      <tr>
-        <td><code><%= $r->{ih} // '' %></code></td>
-        <td><%= $r->{vol} // '' %></td>
-        <td><%= $r->{hit_path} // '' %></td>
-        <td><%= $r->{source_path} // '' %></td>
-        <td><%= $r->{why} // '' %></td>
-      </tr>
-    % }
-  </table>
-% }
-
-% if (@$other) {
-  <hr style="margin: 18px 0;">
-  <h2>Other</h2>
-  <table class="table">
-    <tr>
-      <th>ih</th>
-      <th>subclass</th>
-      <th>why</th>
-    </tr>
-    % for my $r (@$other) {
-      <tr>
-        <td><code><%= $r->{ih} // '' %></code></td>
-        <td><%= $r->{subclass} // '' %></td>
-        <td><%= $r->{why} // '' %></td>
-      </tr>
-    % }
-  </table>
 % }
