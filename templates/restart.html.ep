@@ -4,4 +4,7 @@
 <h2>Restarting server…</h2>
 <p>Please wait.</p>
 
+% my $http_debug = app->defaults->{http_debug} ? 1 : 0;
+
+
 <meta http-equiv="refresh" content="2; url=/" />

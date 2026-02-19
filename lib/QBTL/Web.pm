@@ -1062,91 +1062,95 @@ sub app {
 
   $r->get(
     '/qbt/no_payload' => sub {
-    my $c = shift;
+      my $c = shift;
 
-    my $h = $c->app->defaults->{classes}{NO_PAYLOAD};
-    $h = {} if ref($h) ne 'HASH';
+      my $h = $c->app->defaults->{classes}{NO_PAYLOAD};
+      $h = {} if ref( $h ) ne 'HASH';
 
-    # newest first
-    my @keys =
-      sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) }
-      keys %$h;
+      # newest first
+      my @keys =
+          sort { ( $h->{$b}{ts} // 0 ) <=> ( $h->{$a}{ts} // 0 ) }
+          keys %$h;
 
-    my @rows = map {
-      my $r = $h->{$_};
-      $r = {} if ref($r) ne 'HASH';
-      +{
-        ih       => ( $r->{ih}       // $_ ),
-        subclass => ( $r->{subclass} // '' ),
-        ts       => ( $r->{ts}       // 0 ),
-        why      => ( $r->{why}      // '' ),
+      my @rows = map {
+        my $r = $h->{$_};
+        $r = {} if ref( $r ) ne 'HASH';
+        +{
+          ih       => ( $r->{ih}       // $_ ),
+          subclass => ( $r->{subclass} // '' ),
+          ts       => ( $r->{ts}       // 0 ),
+          why      => ( $r->{why}      // '' ),
 
-        name        => ( $r->{name}        // '' ),
-        bucket      => ( $r->{bucket}      // '' ),
-        tracker     => ( $r->{tracker}     // '' ),
-        source_path => ( $r->{source_path} // '' ),
-        total_size  => ( $r->{total_size}  // 0 ),
+          name        => ( $r->{name}        // '' ),
+          bucket      => ( $r->{bucket}      // '' ),
+          tracker     => ( $r->{tracker}     // '' ),
+          source_path => ( $r->{source_path} // '' ),
+          total_size  => ( $r->{total_size}  // 0 ),
 
-        vol      => ( $r->{vol}      // '' ),
-        hit_path => ( $r->{hit_path} // '' ),
-        leaf     => ( $r->{leaf}     // '' ),
-      }
-    } @keys;
+          vol      => ( $r->{vol}      // '' ),
+          hit_path => ( $r->{hit_path} // '' ),
+          leaf     => ( $r->{leaf}     // '' ),}
+      } @keys;
 
-    # ---- bucket classifier (subclass wins; why is fallback) ----
-    my $bucket_of = sub {
-      my ($r) = @_;
-      my $sub = uc( $r->{subclass} // '' );
-      my $why = lc( $r->{why}      // '' );
+      # ---- bucket classifier (subclass wins; why is fallback) ----
+      my $bucket_of = sub {
+        my ( $r ) = @_;
+        my $sub   = uc( $r->{subclass} // '' );
+        my $why   = lc( $r->{why}      // '' );
 
-      return 'INTERNAL'       if $sub eq 'INTERNAL';
-      return 'NO_HITS'        if $sub eq 'NO_HITS';
-      return 'VERIFY_FAILED'  if $sub eq 'VERIFY_FAILED';
-      return 'BAD_META'       if $sub eq 'BAD_META';
-      return 'VOLUME_MISSING' if $sub eq 'VOLUME_MISSING';
+        return 'INTERNAL'       if $sub eq 'INTERNAL';
+        return 'NO_HITS'        if $sub eq 'NO_HITS';
+        return 'VERIFY_FAILED'  if $sub eq 'VERIFY_FAILED';
+        return 'BAD_META'       if $sub eq 'BAD_META';
+        return 'VOLUME_MISSING' if $sub eq 'VOLUME_MISSING';
 
-      # fallback by "why"
-      return 'VOLUME_MISSING' if $why =~ /\bvolume\b|\bunmount/;
-      return 'VERIFY_FAILED'  if $why =~ /\bverify\b|\broot_mismatch\b/;
-      return 'BAD_META'       if $why =~ /\bbad rec\b|\bno files\b|\bno usable anchors\b|\bmetadata\b/;
-      return 'INTERNAL'       if $why =~ /\binternal\b|\bunexpected\b|\bcaller\b|\bbug\b|\bunreachable\b/;
+        # fallback by "why"
+        return 'VOLUME_MISSING' if $why =~ /\bvolume\b|\bunmount/;
+        return 'VERIFY_FAILED'  if $why =~ /\bverify\b|\broot_mismatch\b/;
+        return 'BAD_META'
+            if $why =~
+            /\bbad rec\b|\bno files\b|\bno usable anchors\b|\bmetadata\b/;
+        return 'INTERNAL'
+            if $why =~
+            /\binternal\b|\bunexpected\b|\bcaller\b|\bbug\b|\bunreachable\b/;
 
-      # default: treat unknown as INTERNAL-ish (investigate)
-      return 'INTERNAL';
-    };
-
-    my %bucket;
-    for my $r (@rows) {
-      push @{ $bucket{ $bucket_of->($r) } }, $r;
-    }
-
-    # priority order requested: 5 1 3 4 2
-    my @order = qw(
-      INTERNAL
-      NO_HITS
-      VERIFY_FAILED
-      BAD_META
-      VOLUME_MISSING
-    );
-
-    my @sections;
-    for my $k (@order) {
-      my $list = $bucket{$k} || [];
-      next unless @$list;
-      push @sections, {
-        key   => $k,
-        count => scalar(@$list),
-        rows  => $list,
+        # default: treat unknown as INTERNAL-ish (investigate)
+        return 'INTERNAL';
       };
-    }
 
-    $c->stash(
-      sections => \@sections,
-      # optional: if you ever want a tiny nav/jump list later
-      # counts   => { map { $_ => scalar(@{ $bucket{$_} || [] }) } @order },
-    );
+      my %bucket;
+      for my $r ( @rows ) {
+        push @{$bucket{$bucket_of->( $r )}}, $r;
+      }
 
-    return $c->render( template => 'qbt_no_payload' );
+      # priority order requested: 5 1 3 4 2
+      my @order = qw(
+          INTERNAL
+          NO_HITS
+          VERIFY_FAILED
+          BAD_META
+          VOLUME_MISSING
+      );
+
+      my @sections;
+      for my $k ( @order ) {
+        my $list = $bucket{$k} || [];
+        next unless @$list;
+        push @sections,
+            {
+             key   => $k,
+             count => scalar( @$list ),
+             rows  => $list,};
+      }
+
+      $c->stash(
+        sections => \@sections,
+
+        # optional: if you ever want a tiny nav/jump list later
+        # counts   => { map { $_ => scalar(@{ $bucket{$_} || [] }) } @order },
+      );
+
+      return $c->render( template => 'qbt_no_payload' );
     } );
 
   $r->get(    # Page_View
@@ -1294,6 +1298,29 @@ sub app {
 
      my $found = scalar( @rows );
 
+     my $autoback = $c->param( 'autoback' ) // '';
+     if ( $autoback && $found == 0 ) {
+
+       # Keep view knobs, but drop q + autoback + page
+       my $mode = $c->param( 'mode' ) // '';
+       $mode = ( $mode eq 'scroll' ) ? 'scroll' : 'paginate';
+
+       my $show = $c->param( 'show' ) // 'missing';
+       $show = ( $show eq 'all' ) ? 'all' : 'missing';
+
+       my $sort = $c->param( 'sort' ) // 'name';
+       $sort = ( $sort eq 'size' ) ? 'size' : 'name';
+
+       my $per = int( $c->param( 'per' ) // 20 );
+       $per = 20  if $per < 20;
+       $per = 500 if $per > 500;
+
+       my $fallback =
+           "/torrents?mode=$mode&show=$show&sort=$sort&per=$per&page=1";
+
+       return $c->redirect_to( $fallback );
+     }
+
      my ( $pages, $start_n, $end_n ) = ( 1, 0, 0 );
      my @sample = @rows;
 
@@ -1381,6 +1408,7 @@ sub app {
                  rows  => \@rows, );
       return $c->render( template => 'qbt_triage' );
     } );
+
   # ---------- Idle observer tick ----------
   my $tick_seconds = 5;
   QBTL::Queue->start( $app, opts => $opts, tick_seconds => $tick_seconds );

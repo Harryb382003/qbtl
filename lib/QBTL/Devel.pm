@@ -1,19 +1,17 @@
 package QBTL::Devel;
 
 use common::sense;
-
+use Data::Dumper;
+use File::Spec ();
+use File::Temp qw(tempfile);
+use JSON::PP   ();
+use Encode     qw(encode decode);
 use Mojo::IOLoop;
 use Mojo::JSON qw(true);
 use Mojo::Util qw(md5_sum);
-use Data::Dumper;
 
 use QBTL::Utils qw(prefix_dbg);
 use QBTL::TorrentParser;
-
-# use lib 'lib';
-# use QBTL::LocalCache;
-# use QBTL::QBT;
-# use QBTL::Scan;
 
 sub register_routes {
   my ( $app, $opts ) = @_;
@@ -22,15 +20,54 @@ sub register_routes {
   my $r        = $app->routes;
   my $root_dir = $opts->{root_dir} || '.';
 
+  # ---- load persisted dev prefs (file-backed) ----
+  my $prefs = _prefs_load( $app );
+  $app->defaults->{prefs} = $prefs;
+
+  # canonical single flag used everywhere
+  $app->defaults->{http_debug} = ( $prefs->{http_debug} ? 1 : 0 );
+
   #####################################################################
   # DEBUGGING ROUTES
   #####################################################################
 
+  $r->post(
+    '/debug/rebuild_local_cache' => sub {
+      my $c = shift;
+      $c->flash( notice => "Rebuilding local cache…" );
+      my ( $local_by_ih ) =
+          QBTL::LocalCache::build_local_by_ih(
+                           $app,
+                           root_dir => ( $c->app->defaults->{root_dir} || '.' ),
+                           opts_local => {torrent_dir => "/"}, );
+
+      $c->render(
+               text => "rebuilt local cache: " . scalar( keys %$local_by_ih ) );
+    } );
+
+  $r->post(
+    '/dev/prefs/http_debug' => sub {
+      my $c = shift;
+
+      my $v = $c->param( 'http_debug' );
+      $v = ( $v && $v =~ /\A1\z/ ) ? 1 : 0;
+
+      $c->app->defaults->{prefs} ||= {};
+      $c->app->defaults->{prefs}{http_debug} = $v;
+
+      # single canonical runtime flag
+      $c->app->defaults->{http_debug} = $v;
+
+      _prefs_write( $c->app, $c->app->defaults->{prefs} );
+
+      my $back = $c->param( 'return_to' ) // '/';
+      $back = '/' if $back !~ m{\A/} || $back =~ m{://} || $back =~ m{[\r\n]};
+      return $c->redirect_to( $back );
+    } );
+
   $r->get(
     '/localcache/rebuild' => sub {
       my $c = shift;
-
-      $c->stash( dev_mode => ( $opts->{dev_mode} ? 1 : 0 ) );
 
       my $tok = $c->session( 'rebuild_tok' ) // '';
       if ( !length $tok ) {
@@ -40,28 +77,12 @@ sub register_routes {
       }
 
       $c->stash( rebuild_tok => $tok );
-
-      $c->app->log->debug(   prefix_dbg()
-                           . " GET /localcache/rebuild tok="
-                           . ( length( $tok ) ? "set" : "EMPTY" ) );
       return $c->render( template => 'localcache_rebuild' );
     } );
 
   $r->post(
     '/localcache/rebuild' => sub {
-      my $c   = shift;
-      my $app = $c->app;
-
-      my $root = $app->defaults->{root_dir} || '.';
-
-      $app->defaults->{localcache_rebuild} ||= {};
-      my $st = $app->defaults->{localcache_rebuild};
-
-      # inflight guard first (this is the real protection)
-      if ( $st->{inflight} ) {
-        $c->flash( notice => "Rebuild already in progress…" );
-        return $c->redirect_to( '/localcache/rebuild' );
-      }
+      my $c = shift;
 
       my $tok  = $c->param( 'tok' )           // '';
       my $want = $c->session( 'rebuild_tok' ) // '';
@@ -72,26 +93,36 @@ sub register_routes {
         return $c->redirect_to( '/localcache/rebuild' );
       }
 
-      # consume token (prevents POST replay from browser back/refresh)
+      # consume token
       delete $c->session->{rebuild_tok};
 
-      # initialize state
+      my $app  = $c->app;
+      my $root = $app->defaults->{root_dir} || '.';
+
+      $app->defaults->{localcache_rebuild} ||= {};
+      my $st = $app->defaults->{localcache_rebuild};
+
+      # inflight guard (prevents actual re-runs even if browser retries POST)
+      if ( $st->{inflight} ) {
+        $c->flash( notice => "Rebuild already in progress…" );
+        return $c->redirect_to( '/localcache/rebuild' );
+      }
+
       $st->{inflight}    = 1;
       $st->{started_ts}  = time;
       $st->{done_ts}     = 0;
       $st->{last_err}    = '';
       $st->{pid}         = $$;
-      $st->{done_logged} = 0;
-
+      $st->{done_logged} = 0;     # allow status endpoint to log completion once
       delete $st->{heartbeat_ts};
 
-      $app->log->debug( prefix_dbg()
-                   . " localcache rebuild START inflight=1 pid=$$ root=$root" );
+      $app->log->debug(
+                 prefix_dbg() . " localcache rebuild START inflight=1 pid=$$" );
 
+      # Run rebuild off-request
       Mojo::IOLoop->subprocess(
         sub {
-          # child (forked): build + write cache files
-          # NOTE: In a fork, $app exists, but avoid doing web/router stuff here.
+          # child (DO NOT touch $app in here)
           QBTL::LocalCache::build_local_by_ih(
                                              $app,
                                              root_dir   => $root,
@@ -106,7 +137,7 @@ sub register_routes {
           $st->{inflight}    = 0;
           $st->{done_ts}     = time;
           $st->{last_err}    = ( $err ? "$err" : '' );
-          $st->{done_logged} = 0; # allow status endpoint to log completion once
+          $st->{done_logged} = 0;
 
           if ( $err ) {
             $app->log->error(
@@ -117,11 +148,10 @@ sub register_routes {
           }
         } );
 
-      # return immediately so browser doesn't retry the POST
+      # IMPORTANT: return immediately so browser doesn't retry
       $c->flash( notice => "Rebuilding local cache…" );
       return $c->redirect_to( '/localcache/rebuild' );
     } );
-
   $r->get(
     '/localcache/rebuild_status' => sub {
       my $c = shift;
@@ -184,20 +214,6 @@ sub register_routes {
       Mojo::IOLoop->next_tick( sub { Mojo::IOLoop->stop } );
     } );
 
-  $r->post(
-    '/debug/rebuild_local_cache' => sub {
-      my $c = shift;
-      $c->flash( notice => "Rebuilding local cache…" );
-      my ( $local_by_ih ) =
-          QBTL::LocalCache::build_local_by_ih(
-                           $app,
-                           root_dir => ( $c->app->defaults->{root_dir} || '.' ),
-                           opts_local => {torrent_dir => "/"}, );
-
-      $c->render(
-               text => "rebuilt local cache: " . scalar( keys %$local_by_ih ) );
-    } );
-
   $r->get(
     '/qbt_name_is_hash' => sub {
       my $c = shift;
@@ -243,8 +259,9 @@ sub register_routes {
 
   $r->post(
     '/restart' => sub {
-      my $c = shift;
-
+      my $c          = shift;
+      my $http_debug = $c->param( 'http_debug' ) ? 1 : 0;
+      $c->app->defaults->{http_debug} = $http_debug;
       unless ( $c->app->defaults->{dev_mode} ) {
         return $c->render( text => "dev-mode required", status => 403 );
       }
@@ -279,6 +296,58 @@ sub register_routes {
     } );
 
   return;
+}
+
+sub _prefs_path {
+  my ( $app ) = @_;
+  my $root =
+      ( ref( $app ) && ref( $app->defaults ) && $app->defaults->{root_dir} )
+      ? $app->defaults->{root_dir}
+      : '.';
+  return File::Spec->catfile( $root, 'qbtl.cfg' );    # JSON file
+}
+
+sub _prefs_load {
+  my ( $app ) = @_;
+  my $path = _prefs_path( $app );
+
+  return {} unless -e $path;
+
+  my $raw;
+  if ( open my $fh, '<:raw', $path ) {
+    local $/;
+    $raw = <$fh>;
+    close $fh;
+  }
+  else {
+    return {};
+  }
+
+  my $text = eval { decode( 'UTF-8', $raw, 1 ) };
+  return {} if $@;
+
+  my $h = eval { JSON::PP::decode_json( $text ) };
+  return {} if $@ || ref( $h ) ne 'HASH';
+
+  return $h;
+}
+
+sub _prefs_write {
+  my ( $app, $prefs ) = @_;
+  $prefs ||= {};
+  return 0 unless ref( $prefs ) eq 'HASH';
+
+  my $path = _prefs_path( $app );
+
+  my $json = JSON::PP->new->utf8->pretty->canonical( 1 )->encode( $prefs );
+
+  my ( $fh, $tmp ) = tempfile( "$path.XXXX", UNLINK => 0 );
+  print {$fh} $json;
+  close $fh;
+
+  rename $tmp, $path or do { unlink $tmp; return 0; };
+
+  return 1;
 }
 
 1;

@@ -85,7 +85,14 @@
                 <input type="hidden" name="hash" value="<%= $t->{ih} %>">
                 <input type="hidden" name="source_path" value="<%= $t->{source_path} %>">
                 <input type="hidden" name="confirm" value="1">
-                <input type="hidden" name="return_to" value="<%= url_for->to_string %>">
+                % my $return_to = $c->req->url->path->to_string // '/';
+                % my $qs = $c->req->url->query->to_string // '';
+                % $return_to .= "?$qs" if length $qs;
+                % $return_to = '/torrents' if $return_to !~ m{\A/} || $return_to =~ m{://} || $return_to =~ m{[\r\n]};
+                % # tag this return as "came from Add action"
+                % $return_to .= (index($return_to, '?') >= 0 ? '&' : '?') . 'autoback=1';
+
+                <input type="hidden" name="return_to" value="<%= $return_to %>">
                 <button type="submit">Add</button>
               </form>
             </div>

@@ -27,12 +27,21 @@ sub new {
   $opts ||= {};
   die "caller must not pass ua" if exists $opts->{ua};
 
-  # Auto-enable HTTP dump in dev_mode unless caller explicitly set it
+  # Auto-enable HTTP dump based on persisted pref (or dev_mode fallback)
   if ( !exists $opts->{debug_http} ) {
     my $app = $opts->{app};
 
-    my $dev = ( ref( $app ) && $app->defaults->{dev_mode} ) ? 1 : 0;
-    $opts->{debug_http} = $dev;
+    my $pref =
+      (ref($app) && $app->defaults && exists $app->defaults->{http_debug})
+        ? ($app->defaults->{http_debug} ? 1 : 0)
+        : undef;
+
+    my $dev =
+      (ref($app) && $app->defaults && $app->defaults->{dev_mode})
+        ? 1 : 0;
+
+    # if pref exists, it wins; otherwise fall back to dev_mode
+    $opts->{debug_http} = defined($pref) ? $pref : $dev;
   }
 
   my $self = {
@@ -89,25 +98,23 @@ sub qbt_echo {
   my $want_api = $opt{want_api} ? 1 : 0;
 
   my $out = {
-    pid      => 0,
-    qbt_up   => 0,        # explicit proc status
-    want_api => $want_api,# echoes whether we probed
-    api_ok   => 0,
-    api_ts   => 0,        # "API status known" only if we set this
-    echo_ts  => time,
-    echo_err => '',
-  };
+             pid      => 0,
+             qbt_up   => 0,            # explicit proc status
+             want_api => $want_api,    # echoes whether we probed
+             api_ok   => 0,
+             api_ts   => 0,            # "API status known" only if we set this
+             echo_ts  => time,
+             echo_err => '',};
 
   my $pid = _find_qbt_pid();
   $out->{pid} = $pid;
 
   unless ( $pid ) {
     $out->{echo_err} = 'qbt not running';
-    $app->log->debug(
-      prefix_dbg()
-        . $out->{echo_err}
-        . " want_api: $want_api pid: " . ( $out->{pid} || 0 )
-    );
+    $app->log->debug(   prefix_dbg()
+                      . $out->{echo_err}
+                      . " want_api: $want_api pid: "
+                      . ( $out->{pid} || 0 ) );
     return $out;
   }
 
@@ -117,13 +124,13 @@ sub qbt_echo {
   return $out unless $want_api;
 
   # ---- API probe (tight timeout) ----
-  $out->{api_ts} = time;   # mark "known" once we attempt probe
+  $out->{api_ts} = time;    # mark "known" once we attempt probe
 
   my $ok = eval {
     local $SIG{ALRM} = sub { die "api timeout\n" };
     alarm 2;
 
-    my $qbt = QBTL::QBT->new( { timeout => 2 } );
+    my $qbt = QBTL::QBT->new( {timeout => 2} );
     $qbt->api_qbt_login();
 
     alarm 0;
@@ -131,25 +138,22 @@ sub qbt_echo {
   };
 
   if ( $ok ) {
-    $out->{api_ok} = 1;
+    $out->{api_ok}   = 1;
     $out->{echo_err} = '';
   }
   else {
-    $out->{api_ok} = 0;
+    $out->{api_ok}   = 0;
     $out->{echo_err} = $@ || 'api probe failed';
     $out->{echo_err} =~ s/\s+\z//;
   }
 
-  $app->log->debug(
-    prefix_dbg()
-      . ( length($out->{echo_err}) ? $out->{echo_err} : 'api ok' )
-      . " want_api: $want_api pid: " . ( $out->{pid} || 0 )
-  );
+  $app->log->debug( prefix_dbg()
+                  . ( length( $out->{echo_err} ) ? $out->{echo_err} : 'api ok' )
+                  . " want_api: $want_api pid: "
+                  . ( $out->{pid} || 0 ) );
 
   return $out;
 }
-
-
 
 # ------------------------------
 #
@@ -567,10 +571,38 @@ sub _api_torrents_add__multipart {
   unless ( -f $torrent_path ) {
     return $self->_fail( "torrent not found: $torrent_path" );
   }
-  my @content = ( torrents => [$torrent_path] );
+
+  # Read torrent file as BYTES (prevents "content must be bytes")
+  my $raw;
+  {
+    open my $fh, '<:raw', $torrent_path
+        or return $self->_fail( "open($torrent_path): $!" );
+    local $/;
+    $raw = <$fh>;
+    close $fh;
+  }
+
+  # Filename in multipart must be BYTES too
+  require File::Basename;
+  require Encode;
+
+  my $fname = File::Basename::basename( $torrent_path );
+  my $fname_b =
+      utf8::is_utf8( $fname ) ? Encode::encode( 'UTF-8', $fname ) : $fname;
+
+  my @content = (
+    torrents => [
+                  undef,       # no filehandle; we provide bytes directly
+                  $fname_b,    # filename (bytes)
+                  Content_Type => 'application/x-bittorrent',
+                  Content      => $raw,                         # raw bytes
+    ], );
 
   if ( defined $savepath && length $savepath ) {
-    push @content, ( savepath => $savepath );
+    my $sp = $savepath;
+    $sp = Encode::encode( 'UTF-8', $sp )
+        if utf8::is_utf8( $sp );                    # keep multipart happy
+    push @content, ( savepath => $sp );
   }
 
   my $res = $self->{ua}->post(

@@ -60,8 +60,7 @@
     .nav-notice{padding:6px 10px;border:1px solid #c9d7ff;background:#eef3ff;border-radius:6px;}
   </style>
 </head>
-<body>
-  <div class="navbar">
+<body>  <div class="navbar">
     % my $qh = app->defaults->{health}{qbt} || {};
 
     % my $proc_up   = $qh->{qbt_up} ? 1 : 0;
@@ -126,6 +125,36 @@
         <button class="navbtn navbtn--wide" type="submit">Rebuild Cache<br>
           <small>Last: <%= $nav_label %></small>
         </button>
+      </form>
+
+      %# -----------------------------
+      %# Dev prefs: HTTP UA dump toggle
+      %# -----------------------------
+      % my $http_debug = app->defaults->{http_debug} ? 1 : 0;
+
+      % my $return_to = $c->req->url->path->to_string // '/';
+      % my $qs = $c->req->url->query->to_string // '';
+      % $return_to .= "?$qs" if length $qs;
+      % $return_to = '/' if $return_to !~ m{\A/} || $return_to =~ m{://} || $return_to =~ m{[\r\n]};
+
+      <form method="post" action="/dev/prefs/http_debug" style="display:inline-flex; align-items:center; gap:8px;">
+        <input type="hidden" name="return_to" value="<%= $return_to %>">
+
+        <span style="opacity:0.75;">HTTP dump:</span>
+
+        <label style="display:inline-flex; align-items:center; gap:6px;">
+          <input type="radio" name="http_debug" value="0"
+                 <%= $http_debug ? '' : 'checked' %>
+                 onchange="this.form.submit()">
+          Off
+        </label>
+
+        <label style="display:inline-flex; align-items:center; gap:6px;">
+          <input type="radio" name="http_debug" value="1"
+                 <%= $http_debug ? 'checked' : '' %>
+                 onchange="this.form.submit()">
+          On
+        </label>
       </form>
 
       <form method="post" action="/restart">
