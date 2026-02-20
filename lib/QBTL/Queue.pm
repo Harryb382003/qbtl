@@ -564,20 +564,34 @@ sub pump_tick {
 
     # non-terminal jobs: next_ts defaults to now if missing/garbage
     my $next_ts = $job->{next_ts};
-    $next_ts = $now if !defined( $next_ts ) || $next_ts !~ /^\d+$/;
+    $next_ts = $now if !defined( $next_ts ) || $next_ts !~ /^\d+(?:\.\d+)?$/;
 
     my $wait = $next_ts - $now;
 
-    # Unified per-job-per-tick line: BR + pump_tick + JOB
-    $app->log->debug( prefix_dbg() . "  BR:"
-                . ( $job->{bridged} ? 1 : 0 )
-                . " PT: $sum"
-                . " [JOB] ih:"
-                . short_ih( $ih )
-                . " status: $status stage: $stage step_idx: $step_idx " . " F: "
-                . epoch2time( $next_ts )
-                . " wait: "
-                . sprintf( "% +ds", $wait ) );
+    my $interactive = ( ( $job->{status} // '' ) eq 'needs_user' ) ? 1 : 0;
+
+    my $mode_tag =
+        $interactive
+        ? 'INTERACTIVE=1'
+        : ( ( $job->{active} ? 'ACTIVE=1' : '' ) );
+
+    my $line =
+          prefix_dbg() . "  BR:"
+        . ( defined( $job->{bridged} ) ? $job->{bridged} : '(undef)' )
+        . " PT: jobs=$sum " # whatever your "jobs=" variable is named in this scope
+        . " $mode_tag "
+        . "[JOB] ih:"
+        . short_ih( $ih )
+        . " status: $status stage: $stage step_idx: $step_idx" . "  F: "
+        . scalar( localtime( $next_ts ) )
+        . " wait: "
+        . sprintf( "%+ds", int( $wait ) );
+
+    _maybe_log_job_status_line(
+                                $app,
+                                $job,
+                                interactive => $interactive,
+                                line        => $line, );
 
     my $is_terminal =
         ( $status =~ /^(done|failed|needs_user|needs_triage|no_hits)$/ );
@@ -1712,6 +1726,110 @@ sub _run_step {
 #   }
 
   return ( 'fail', "unknown op=$op" );
+}
+
+# --------------------------
+# Logging squelch helpers
+# --------------------------
+
+sub _job_log_signature {
+  my ( $job ) = @_;
+  $job = {} if ref( $job ) ne 'HASH';
+
+  # Only include fields that represent real state changes.
+  # DO NOT include timestamps or formatted time.
+  return join '|',
+      ( $job->{ih}       // '' ),
+      ( $job->{status}   // '' ),
+      ( $job->{stage}    // '' ),
+      ( $job->{step_idx} // '' ),
+      ( $job->{op}       // '' ),
+      ( $job->{why}      // '' ),
+      ( $job->{tries}    // '' ),
+      ( $job->{wait}     // '' )
+      ,    # ok if this changes meaningfully; remove if too chatty
+      ;
+}
+
+sub _should_log_job_status_line {
+  my ( $self, $job, %ctx ) = @_;
+  return 0 unless $job && ref( $job ) eq 'HASH';
+
+  my $now = time;
+
+  my $sig = _job_log_signature( $job );
+
+  my $last_sig     = $job->{_log_last_sig};
+  my $sig_first_ts = $job->{_log_sig_first_ts} // 0;
+
+  my $status      = $job->{status} // '';
+  my $interactive = $ctx{interactive} ? 1 : 0;
+
+  # If signature changed: always log + reset squelch timer.
+  if ( !defined( $last_sig ) || $sig ne $last_sig ) {
+    $job->{_log_last_sig}     = $sig;
+    $job->{_log_sig_first_ts} = $now;
+    $job->{_log_squelched}    = 0;
+    return 1;
+  }
+
+# Signature unchanged. Default: allow caller's existing behavior unless we squelch.
+# if ((jobs == interactive) && et >= 1min) { squelch until something other than ts changes }
+  if ( $interactive && $status eq 'needs_user' ) {
+
+    # Start the "stable since" clock the first time we see this signature
+    $sig_first_ts = $now if !$sig_first_ts;
+    $job->{_log_sig_first_ts} = $sig_first_ts;
+
+    my $et = $now - $sig_first_ts;
+
+    # After 60s of no meaningful change, suppress repeats.
+    if ( $et >= 60 ) {
+      $job->{_log_squelched} = 1;
+      return 0;
+    }
+
+   # Within first minute, let it log (keeps current visibility while it settles)
+    return 1;
+  }
+
+  # For non-interactive / non-needs_user cases, keep current verbosity
+  return 1;
+}
+
+sub _maybe_log_job_status_line {
+  my ( $app, $job, %args ) = @_;
+  my $interactive = $args{interactive}  ? 1           : 0;
+  my $line        = defined $args{line} ? $args{line} : '';
+
+  return if ref( $job ) ne 'HASH';
+  return if $line eq '';
+  return if !$app;
+
+  my $now = time;
+
+  if ( $interactive ) {
+    $job->{_interactive_since} //= $now;
+  }
+  else {
+    delete $job->{_interactive_since};
+    delete $job->{_log_sig_last};
+  }
+
+  if ( $interactive ) {
+    my $et = $now - ( $job->{_interactive_since} // $now );
+
+    if ( $et >= 60 ) {
+      my $sig = $line;
+      $sig =~ s/\bF:\s+.*?\bwait:\s+/wait: /;
+      $sig =~ s/\bwait:\s*[+-]?\d+s\b/wait: Ns/g;
+
+      return if defined $job->{_log_sig_last} && $job->{_log_sig_last} eq $sig;
+      $job->{_log_sig_last} = $sig;
+    }
+  }
+
+  $app->log->debug( $line );
 }
 
 1;
