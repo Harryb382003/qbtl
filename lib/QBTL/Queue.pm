@@ -217,10 +217,15 @@ sub _jobs_summary {
 # Planning
 # ------------------------------
 sub enqueue_add_one {
-  my ( $class, $app, $ih, %args ) = @_;
-  die prefix_dbg . "bad ih" unless defined( $ih ) && $ih =~ /^[0-9a-f]{40}$/;
+  my ( $class, $app, %args ) = @_;
+
+  my $ih = $args{ih} // '';
+  die prefix_dbg . "bad ih"
+      unless defined( $ih ) && $ih =~ /^[0-9a-f]{40}$/;
+
   $app->log->debug(
              prefix_dbg() . " Entered enqueue_add_one ih: " . short_ih( $ih ) );
+
   my $jobs = _jobs_ref( $app );
   my $now  = time;
 
@@ -249,7 +254,7 @@ sub enqueue_add_one {
   # qBt keyword purity (store what we pass to qBt using qBt names)
   $job->{source_path} = $args{source_path} if defined $args{source_path};
 
-  # qBt param is " savepath " (field for torrents/add)
+  # qBt param is "savepath" (field for torrents/add)
   $job->{savepath} = $args{savepath} if defined $args{savepath};
 
   # rename intent (optional)
@@ -297,6 +302,7 @@ sub enqueue_add_one {
                     . "  enqueue_add_one ih = "
                     . short_ih( $ih )
                     . " rename = $rename_dbg " );
+
   return $job;
 }
 

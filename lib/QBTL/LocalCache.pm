@@ -91,9 +91,11 @@ sub build_local_by_ih {
     die "scan returned non-HASH" unless ref( $scan ) eq 'HASH';
 
     my $tp = QBTL::TorrentParser->new(
-                                   {
-                                    all_torrents => ( $scan->{torrents} || [] ),
-                                    opts         => $opts_local,} );
+      {
+        all_torrents => ( $scan->{torrents} || [] ),
+        opts         => $opts_local,
+      }
+    );
 
     my $parsed = $tp->extract_metadata( $args{qbt_loaded_tor} );    # optional
     die "parse returned non-HASH" unless ref( $parsed ) eq 'HASH';
@@ -116,16 +118,16 @@ sub build_local_by_ih {
 
   # ----------------------------
   # STORE: lock/ingest primary local dataset
+  # (meta filled in later once we know mtime/src)
   # ----------------------------
   eval { store_put_local_primary( $app, $local_by_ih ) if $app; 1 } or do {
-
-    # store failures should not prevent returning the dataset
     my $e = "$@";
     chomp $e;
     _mark_broken(
-                  %args,
-                  key => 'store',
-                  why => "store_put_local_primary failed: $e" );
+      %args,
+      key => 'store',
+      why => "store_put_local_primary failed: $e"
+    );
   };
 
   # ----------------------------
@@ -141,7 +143,7 @@ sub build_local_by_ih {
 
     # json for humans (write raw bytes to avoid encoding surprises)
     my $json =
-        JSON::PP->new->utf8->pretty->canonical( 1 )->encode( $local_by_ih );
+      JSON::PP->new->utf8->pretty->canonical( 1 )->encode( $local_by_ih );
 
     my ( $fh, $tmp ) = tempfile( "$path_json.XXXX", UNLINK => 0 );
     binmode( $fh, ':raw' );    # IMPORTANT
@@ -157,7 +159,18 @@ sub build_local_by_ih {
     chomp $e;
     _mark_broken( %args, key => 'build', why => "cache write failed: $e" );
 
-# Still return the in-memory dataset (it IS good); cache persistence is degraded.
+    # Even if persistence failed, publish a truthful in-memory "source"
+    eval {
+      store_put_local_primary(
+        $app,
+        $local_by_ih,
+        mtime => time(),
+        src   => 'memory_only',
+      ) if $app;
+      1;
+    };
+
+    # Still return the in-memory dataset (it IS good); cache persistence is degraded.
     return ( $local_by_ih, time(), 'memory_only' );
   }
 
@@ -167,8 +180,29 @@ sub build_local_by_ih {
   my $mtime_bin  = ( stat( $path_bin ) )[9]  || time();
   my $mtime_json = ( stat( $path_json ) )[9] || time();
 
-  $_MEMO{$path_bin}  = {mtime => $mtime_bin,  data => $local_by_ih};
-  $_MEMO{$path_json} = {mtime => $mtime_json, data => $local_by_ih};
+  $_MEMO{$path_bin}  = { mtime => $mtime_bin,  data => $local_by_ih };
+  $_MEMO{$path_json} = { mtime => $mtime_json, data => $local_by_ih };
+
+  # ----------------------------
+  # STORE: publish authoritative cache meta (bin is preferred at load time)
+  # ----------------------------
+  eval {
+    store_put_local_primary(
+      $app,
+      $local_by_ih,
+      mtime => $mtime_bin,
+      src   => $path_bin,
+    ) if $app;
+    1;
+  } or do {
+    my $e = "$@";
+    chomp $e;
+    _mark_broken(
+      %args,
+      key => 'store_meta',
+      why => "store_put_local_primary(meta) failed: $e"
+    );
+  };
 
   # IMPORTANT: since we prefer .stor at load time, report THAT as "Last Cache"
   return ( $local_by_ih, $mtime_bin, $path_bin );

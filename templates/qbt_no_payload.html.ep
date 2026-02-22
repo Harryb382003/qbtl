@@ -17,6 +17,9 @@
 % my $back = $c->req->headers->referrer // '/torrents';
 % $back = '/torrents' if $back !~ m{\A/} || $back =~ m{://} || $back =~ m{[\r\n]};
 
+% my $light_hr  = q{<hr style="margin: 10px 0; border: 0; border-top: 1px solid #333; opacity: 0.18;">};
+% my $medium_hr = q{<hr style="margin: 16px 0; border: 0; border-top: 1px solid #333; opacity: 0.35;">};
+
 % if (!@$sections) {
   <div class="card" style="margin-top:12px;">
     <p style="margin:0;">No records to display.</p>
@@ -27,49 +30,98 @@
 % } else {
 
   % for my $i (0 .. $#$sections) {
-  %   my $sec  = $sections->[$i] || {};
-  %   my $k    = $sec->{key}   // '';
-  %   my $n    = $sec->{count} // 0;
-  %   my $rows = $sec->{rows}  || [];
-  %   $rows = [] if ref($rows) ne 'ARRAY';
+  %   my $sec    = $sections->[$i] || {};
+  %   my $k      = $sec->{key}   // '';
+  %   my $n      = $sec->{count} // 0;
+  %   my $groups = $sec->{groups} || [];
+  %   $groups = [] if ref($groups) ne 'ARRAY';
 
-    <div class="card" style="margin-top: 12px;">
+    <div class="card" style="margin-top:12px;">
       <div style="display:flex; align-items: baseline; justify-content: space-between;">
-        <h2 style="margin: 0;"><%= $label_for->($k) %> = <%= $n %></h2>
+        <h2 style="margin:0;"><%= $label_for->($k) %> = <%= $n %></h2>
       </div>
 
-      <div style="margin-top:10px; overflow-x:auto;">
-        <table class="table">
-          <thead>
-            <tr>
-              <th>name</th>
-              <th>ih</th>
-              <th>source_path</th>
-              <th>why</th>
-            </tr>
-          </thead>
-          <tbody>
-            % for my $r (@$rows) {
-            %   $r = {} if ref($r) ne 'HASH';
-            %   my $name = $r->{name} // '';
-            %   my $ih   = $r->{ih} // '';
-            %   my $sp   = $r->{source_path} // '';
-            %   my $why  = $r->{why} // '';
-            <tr>
-              <td><%= $name %></td>
-              <td style="white-space:nowrap;"><%= $ih %></td>
-              <td><%= $sp %></td>
-              <td><%= $why %></td>
-            </tr>
-            % }
-          </tbody>
-        </table>
-      </div>
+      % if (!@$groups) {
+        <p style="margin:10px 0 0 0; opacity:0.8;">No records.</p>
+      % } else {
+
+        % for my $gi (0 .. $#$groups) {
+        %   my $g     = $groups->[$gi] || {};
+        %   my $gk    = $g->{key}   // '(none)';
+        %   my $gn    = $g->{count} // 0;
+        %   my $rows  = $g->{rows}  || [];
+        %   $rows = [] if ref($rows) ne 'ARRAY';
+
+        %   # Show tier2 header ONLY if this section actually has multiple groups
+        %   my $show_tier2 = (@$groups > 1) ? 1 : 0;
+
+        %   # For VOLUME_MISSING: if all rows share the same 'vol', show it once (header), not as a column
+        %   my $vol_hdr = '';
+        %   if ($k eq 'VOLUME_MISSING') {
+        %     my %vols;
+        %     for my $r (@$rows) {
+        %       $r = {} if ref($r) ne 'HASH';
+        %       my $v = $r->{vol} // '';
+        %       $vols{$v} = 1 if length $v;
+        %     }
+        %     if (keys(%vols) == 1) {
+        %       ($vol_hdr) = keys %vols;
+        %     }
+        %   }
+
+          % if ($show_tier2) {
+            <div style="margin-top:10px; font-weight:600;">
+              <span style="opacity:0.85;"><%= $gk %> = <%= $gn %></span>
+            </div>
+          % } else {
+            <div style="margin-top:10px;"></div>
+          % }
+
+          % if ($k eq 'VOLUME_MISSING' && length $vol_hdr) {
+            <div style="margin:6px 0 0 0; opacity:0.8;">
+              <span style="white-space:nowrap;">Volume:</span>
+              <code style="margin-left:6px;"><%= $vol_hdr %></code>
+            </div>
+          % }
+
+          <div style="margin-top:8px; overflow-x:auto;">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>name</th>
+                  <th>ih</th>
+                  <th>source_path</th>
+                </tr>
+              </thead>
+              <tbody>
+                % for my $r (@$rows) {
+                %   $r = {} if ref($r) ne 'HASH';
+                %   my $name = $r->{name} // '';
+                %   my $ih   = $r->{ih} // '';
+                %   my $sp   = $r->{source_path} // '';
+                <tr>
+                  <td><%= $name %></td>
+                  <td style="white-space:nowrap;"><%= $ih %></td>
+                  <td><%= $sp %></td>
+                </tr>
+                % }
+              </tbody>
+            </table>
+          </div>
+
+          % # light delimiter between tier2 groups (only if there are multiple)
+          % if ($show_tier2 && $gi < $#$groups) {
+            <%= $light_hr %>
+          % }
+        % } # groups loop
+      % } # groups present
+
     </div>
 
+    % # medium delimiter between tier1 sections
     % if ($i < $#$sections) {
-      <hr style="margin: 16px 0; border: 0; border-top: 1px solid #333; opacity: 0.35;">
+      <%= $medium_hr %>
     % }
-  % }
+  % } # sections loop
 
 % }

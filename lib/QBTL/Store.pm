@@ -62,7 +62,25 @@ sub store_put_local_primary {
     $fresh{$ih} = $href;
   }
 
+  # Existing canonical store
   $store->{local_primary} = \%fresh;
+
+  # NEW: publish canonical in-memory view for routes/templates/etc.
+  # (read-only by convention; points at the same locked snapshot)
+  $app->defaults->{localcache} ||= {};
+  $app->defaults->{localcache}{by_ih} = $store->{local_primary};
+
+  # Optional metadata (safe + non-breaking)
+  # Only stamp loaded_ts when asked OR when not already set
+  $app->defaults->{localcache}{loaded_ts} ||= time;
+
+  if ( defined $opt{mtime} ) {
+    $app->defaults->{localcache}{mtime} = $opt{mtime};
+  }
+  if ( defined $opt{src} ) {
+    $app->defaults->{localcache}{src} = $opt{src};
+  }
+
   return 1;
 }
 

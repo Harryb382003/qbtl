@@ -164,6 +164,143 @@
   </div>
 
   <hr />
+  <div id="qbtlModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:9999;">
+  <div style="max-width:900px; margin:6vh auto; background:#111; border:1px solid #333; border-radius:10px;
+padding:14px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+      <div>
+        <div id="qbtlModalTitle" style="font-size:1.1em; font-weight:600;"></div>
+        <div id="qbtlModalSub" style="opacity:.75; font-size:.9em;"></div>
+      </div>
+      <button type="button" id="qbtlModalClose">Done</button>
+    </div>
+
+    <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
+      <button type="button" id="qbtlModalAdd">Add</button>
+      <div style="opacity:.7; font-size:.9em;">(Uses cached meta only — no filesystem)</div>
+    </div>
+
+    <div style="margin-top:12px; max-height:60vh; overflow:auto; border-top:1px solid #222; padding-top:10px;">
+      <div id="qbtlTree"></div>
+    </div>
+
+    <!-- hidden "Add" form submitted by the modal -->
+    <form id="qbtlModalAddForm" method="post" action="/qbt/add_one" style="display:none;">
+      <input type="hidden" name="ih" value="">
+      <input type="hidden" name="hash" value="">
+      <input type="hidden" name="source_path" value="">
+      <input type="hidden" name="confirm" value="1">
+      <input type="hidden" name="return_to" value="">
+    </form>
+  </div>
+</div>
+
+<script>
+(function(){
+  const modal = document.getElementById('qbtlModal');
+  const title = document.getElementById('qbtlModalTitle');
+  const sub   = document.getElementById('qbtlModalSub');
+  const tree  = document.getElementById('qbtlTree');
+  const btnClose = document.getElementById('qbtlModalClose');
+  const btnAdd   = document.getElementById('qbtlModalAdd');
+  const addForm  = document.getElementById('qbtlModalAddForm');
+
+  function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  function buildTree(paths, rootName){
+    // root -> nested objects
+    const root = {};
+    for (const p of paths) {
+      if (!p) continue;
+      const parts = p.split('/').filter(Boolean);
+
+      // If paths include the torrent name as first segment, drop it
+      if (rootName && parts[0] === rootName) parts.shift();
+      if (!parts.length) continue;
+
+      let cur = root;
+      for (let i=0;i<parts.length;i++){
+        const k = parts[i];
+        cur[k] = cur[k] || {};
+        cur = cur[k];
+      }
+    }
+    return root;
+  }
+
+  function renderNode(obj, indent){
+    const keys = Object.keys(obj).sort((a,b)=>a.localeCompare(b));
+    let html = '<ul style="list-style:none; padding-left:'+(indent?18:0)+'px; margin:0;">';
+    for (const k of keys){
+      const child = obj[k];
+      const isDir = child && Object.keys(child).length > 0;
+      if (isDir){
+        html += `
+          <li style="margin:2px 0;">
+            <details open>
+              <summary style="cursor:pointer;">📁 ${esc(k)}</summary>
+              ${renderNode(child, true)}
+            </details>
+          </li>`;
+      } else {
+        html += `<li style="margin:2px 0; padding-left:18px;">📄 ${esc(k)}</li>`;
+      }
+    }
+    html += '</ul>';
+    return html;
+  }
+
+  function openModal({ih, source_path}){
+    title.textContent = 'Loading…';
+    sub.textContent = ih;
+    tree.innerHTML = '';
+
+    modal.style.display = 'block';
+    addForm.elements.namedItem('ih').value = ih;
+    addForm.elements.namedItem('hash').value = ih;
+    addForm.elements.namedItem('source_path').value = source_path || '';
+    addForm.elements.namedItem('return_to').value = window.location.pathname + window.location.search;
+
+    fetch('/api/torrent_tree/' + encodeURIComponent(ih))
+      .then(r => r.json())
+      .then(j => {
+        if (!j || !j.ok) throw new Error((j && j.err) || 'fetch failed');
+        const nm = j.name || '';
+        const files = (j.files || []).map(x => x.path || '');
+        title.textContent = nm ? nm : '(no name)';
+        sub.textContent = ih + (files.length ? ('  •  ' + files.length + ' files') : '');
+        const t = buildTree(files, nm);
+        tree.innerHTML = renderNode(t, false);
+      })
+      .catch(e => {
+        title.textContent = 'Error';
+        tree.innerHTML = '<div style="color:#f66;">' + esc(e.message) + '</div>';
+      });
+  }
+
+  function closeModal(){
+    modal.style.display = 'none';
+  }
+
+  document.addEventListener('click', function(ev){
+    const btn = ev.target.closest('.qbtl-view');
+    if (!btn) return;
+    openModal({
+      ih: btn.getAttribute('data-ih') || '',
+      source_path: btn.getAttribute('data-source_path') || ''
+    });
+  });
+
+  btnClose.addEventListener('click', closeModal);
+  modal.addEventListener('click', function(ev){
+    if (ev.target === modal) closeModal(); // click backdrop closes
+  });
+
+  btnAdd.addEventListener('click', function(){
+    addForm.submit();
+  });
+})();
+</script>
 
   <%= content %>
 </body>

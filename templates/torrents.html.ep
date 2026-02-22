@@ -95,6 +95,11 @@
                 <input type="hidden" name="return_to" value="<%= $return_to %>">
                 <button type="submit">Add</button>
               </form>
+              <form method="get" action="/qbt/view" target="_blank" style="display:inline; margin:0;">
+                <input type="hidden" name="ih" value="<%= $t->{ih} %>">
+                <input type="hidden" name="return_to" value="<%= url_for->to_string %>">
+                <button type="button" onclick="qbtlOpenViewModal('<%= $t->{ih} %>')">View</button>
+              </form>
             </div>
           % } else {
             <em>dev</em>
@@ -104,6 +109,102 @@
     % }
   </tbody>
 </table>
+<div id="viewModal"
+style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:9999;">
+<div style="
+position:absolute; top:6%; left:50%; transform:translateX(-50%);
+width:min(1100px, 92vw); max-height:88vh; overflow:auto;
+background:#151515; color:#eee;
+border:1px solid #333; border-radius:12px;
+box-shadow:0 18px 60px rgba(0,0,0,.6);
+padding:14px;
+font-family: system-ui, -apple-system, sans-serif;
+">
+<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+<div style="min-width:0;">
+<div id="vmTitle" style="font-size:16px; font-weight:700; color:#fff; word-break:break-word;">
+(loading)
+</div>
+<div id="vmMeta" style="margin-top:6px; font-size:12px; opacity:.85; word-break:break-all;"></div>
+<div style="margin-top:8px; font-size:12px; opacity:.65;">Uses cached meta only — no filesystem</div>
+</div>
+
+<div style="display:flex; gap:8px; flex:0 0 auto; align-items:center;">
+<form id="vmAddForm" method="post" action="/qbt/add_one" style="margin:0;">
+<input type="hidden" name="ih" value="">
+<input type="hidden" name="confirm" value="1">
+<input type="hidden" name="return_to" value="<%= url_for->to_string %>">
+<button type="submit" style="
+background:#2d6cdf; color:#fff; border:0; border-radius:8px;
+padding:8px 12px; font-weight:600; cursor:pointer;
+">Add</button>
+</form>
+
+<button type="button" onclick="qbtlCloseViewModal()" style="
+background:#2b2b2b; color:#eee; border:1px solid #444; border-radius:8px;
+padding:8px 12px; font-weight:600; cursor:pointer;
+">Done</button>
+</div>
+</div>
+
+<div style="margin-top:12px; border-top:1px solid #2a2a2a; padding-top:10px;">
+<div id="vmCount" style="font-weight:700; margin-bottom:6px;">Contents</div>
+<ul id="vmList" style="margin:0; padding-left:18px; line-height:1.35;"></ul>
+</div>
+</div>
+</div>
+
+<script>
+function qbtlCloseViewModal() {
+  const m = document.getElementById('viewModal');
+  if (m) m.style.display = 'none';
+}
+
+async function qbtlOpenViewModal(ih) {
+  const m = document.getElementById('viewModal');
+  if (!m) return;
+
+  // reset UI
+  document.getElementById('vmTitle').textContent = '(loading)';
+  document.getElementById('vmMeta').textContent  = '';
+  document.getElementById('vmCount').textContent = 'Contents';
+  const ul = document.getElementById('vmList');
+  ul.innerHTML = '';
+
+  // wire Add form
+  const f = document.getElementById('vmAddForm');
+  f.querySelector('input[name="ih"]').value = ih;
+
+  m.style.display = 'block';
+
+  const res = await fetch('/api/view_meta?ih=' + encodeURIComponent(ih), {
+    headers: { 'Accept': 'application/json' }
+  });
+
+  if (!res.ok) {
+    document.getElementById('vmTitle').textContent = '(failed)';
+    document.getElementById('vmMeta').textContent = 'HTTP ' + res.status;
+    return;
+  }
+
+  const j = await res.json();
+
+  document.getElementById('vmTitle').textContent =
+  (j.name && j.name.trim()) ? j.name : '(no name)';
+
+  document.getElementById('vmMeta').textContent =
+  (j.ih || ih) + (j.source_path ? '  |  ' + j.source_path : '');
+
+  const files = Array.isArray(j.files) ? j.files : [];
+  document.getElementById('vmCount').textContent = 'Contents (' + files.length + ')';
+
+  for (const p of files) {
+    const li = document.createElement('li');
+    li.textContent = p;
+    ul.appendChild(li);
+  }
+}
+</script>
 
 % if ($mode eq 'scroll') {
   </div>

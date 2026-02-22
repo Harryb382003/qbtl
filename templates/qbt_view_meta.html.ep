@@ -1,0 +1,116 @@
+% layout 'main';
+% title 'QBTL - VIEW';
+
+% my $rec = stash('rec') || {};
+% $rec = {} if ref($rec) ne 'HASH';
+
+% my $ih  = stash('ih') // ($rec->{ih} // '');
+% my $sp  = $rec->{source_path} // '';
+% my $name = $rec->{name} // '';
+% $name =~ s/^\s+|\s+$//g;
+
+% if (!$name && length $sp) {
+%   ($name) = $sp =~ m{([^/]+)\z};
+%   $name ||= '';
+%   $name =~ s/\.torrent\z//i;
+% }
+
+% my $files = $rec->{files};
+% $files = [] if ref($files) ne 'ARRAY';
+
+<div style="
+  background:#151515;
+  color:#eee;
+  border:1px solid #333;
+  border-radius:10px;
+  padding:14px;
+  margin-top:12px;
+  max-width:1100px;
+  box-shadow:0 10px 30px rgba(0,0,0,.5);
+  font-family: system-ui, -apple-system, sans-serif;
+">
+  <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px;">
+    <div style="min-width:0;">
+      <div style="font-size:16px; font-weight:700; color:#fff; word-break:break-word;">
+        <%= $name || '(no name)' %>
+      </div>
+
+      <div style="margin-top:6px; font-size:12px; opacity:.85; word-break:break-all;">
+        <code style="background:#0f0f0f; padding:2px 6px; border-radius:6px; border:1px solid #2a2a2a; color:#ddd;">
+          <%= $ih %>
+        </code>
+      </div>
+
+      % if (length $sp) {
+        <div style="margin-top:8px; font-size:12px; opacity:.8; word-break:break-all;">
+          <span style="opacity:.7;">source_path:</span>
+          <code style="background:#0f0f0f; padding:2px 6px; border-radius:6px; border:1px solid #2a2a2a; color:#ddd;">
+            <%= $sp %>
+          </code>
+        </div>
+      % }
+
+      <div style="margin-top:10px; font-size:12px; opacity:.65;">
+        Uses cached meta only — no filesystem
+      </div>
+    </div>
+
+    <div style="display:flex; gap:8px; flex:0 0 auto;">
+      <form method="post" action="/qbt/add_one" style="margin:0;">
+        <input type="hidden" name="ih" value="<%= $ih %>">
+        <input type="hidden" name="confirm" value="1">
+        <input type="hidden" name="return_to" value="<%= stash('return_to') // '/torrents' %>">
+        <button type="submit" style="
+          background:#2d6cdf;
+          color:#fff;
+          border:0;
+          border-radius:8px;
+          padding:8px 12px;
+          font-weight:600;
+          cursor:pointer;
+        ">Add</button>
+      </form>
+
+      <button type="button" onclick="try{window.close()}catch(e){}" style="
+        background:#2b2b2b;
+        color:#eee;
+        border:1px solid #444;
+        border-radius:8px;
+        padding:8px 12px;
+        font-weight:600;
+        cursor:pointer;
+      ">Done</button>
+
+      <a href="<%= stash('return_to') // '/torrents' %>" style="
+        display:inline-flex;
+        align-items:center;
+        background:#2b2b2b;
+        color:#eee;
+        border:1px solid #444;
+        border-radius:8px;
+        padding:8px 12px;
+        font-weight:600;
+        text-decoration:none;
+      ">Back</a>
+    </div>
+  </div>
+
+  <div style="margin-top:12px; border-top:1px solid #2a2a2a; padding-top:10px;">
+    <div style="font-weight:700; margin-bottom:6px;">
+      Contents (<%= scalar(@$files) %>)
+    </div>
+
+    % if (!@$files) {
+      <div style="opacity:.75;">(no files[] in cache)</div>
+    % } else {
+      <ul style="margin:0; padding-left:18px; line-height:1.35;">
+        % for my $f (@$files) {
+          % next unless ref($f) eq 'HASH';
+          % my $p = $f->{path} // '';
+          % next unless length $p;
+          <li style="word-break:break-word;"><%= $p %></li>
+        % }
+      </ul>
+    % }
+  </div>
+</div>

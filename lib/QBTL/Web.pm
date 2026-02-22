@@ -216,6 +216,40 @@ sub app {
   }
 
   $r->get(
+    '/api/torrent_tree/:ih' => sub {
+      my $c  = shift;
+      my $ih = lc( $c->param( 'ih' ) // '' );
+      return $c->render( json => {ok => 0, err => 'bad ih'}, status => 400 )
+          unless $ih =~ /^[0-9a-f]{40}$/;
+
+      my $h = $c->app->defaults->{local_by_ih} || {};
+      $h = {} if ref( $h ) ne 'HASH';
+
+      my $rec = $h->{$ih} || {};
+      $rec = {} if ref( $rec ) ne 'HASH';
+
+      my $files = $rec->{files};
+      $files = [] if ref( $files ) ne 'ARRAY';
+
+      # Return only what UI needs (keep it small)
+      return $c->render(
+        json => {
+          ok    => 1,
+          ih    => $ih,
+          name  => ( $rec->{name} // '' ),
+          files => [
+            map {
+              ( ref( $_ ) eq 'HASH' )
+                  ? {
+                     path   => ( $_->{path}   // '' ),
+                     length => ( $_->{length} // 0 )}
+                  : ()
+            } @$files
+          ],
+        } );
+    } );
+
+  $r->get(
     '/' => sub {
       my $c = shift;
       $c->stash( dev_mode => ( $opts->{dev_mode} ? 1 : 0 ) );
@@ -509,47 +543,105 @@ sub app {
       my $c = shift;
       $c->stash( dev_mode => ( $opts->{dev_mode} ? 1 : 0 ) );
 
-      my $ih = $c->param( 'ih' ) // '';
-      $ih =~ s/\s+//g;
+      my $return_to = $c->param( 'return_to' ) // '';
+      $return_to =~ s/^\s+|\s+$//g;
 
-      my $source_path = $c->param( 'source_path' ) // '';
+# allow only local paths; reject absolute URLs and anything with whitespace/newlines
+      if (    $return_to !~ m{\A/}
+           || $return_to =~ m{://}
+           || $return_to =~ m{[\r\n]} )
+      {
+        $return_to = '/qbt/add_one';
+      }
 
-      $app->log->debug( prefix_dbg() . " SOURCE_PATH: $source_path\n " );
+      my $want_redirect_back = ( $return_to ne '/qbt/add_one' ) ? 1 : 0;
 
-      unless ( $ih =~ /^[0-9a-f]{40}$/ ) {
+      my $fail = sub {
+        my ( $msg, %extra ) = @_;
+        $msg ||= 'error';
+
+        # if coming from Page View / popup flow, prefer redirect back + flash
+        if ( $want_redirect_back ) {
+          $c->flash( notice => $msg );
+          return $c->redirect_to( $return_to );
+        }
+
+        # otherwise, classic add_one screen
         return
             $c->render(
                         template => 'qbt_add_one',
-                        error    => "BAD INFOHASH",
+                        error    => $msg,
                         picked   => {
-                                   ih          => $ih,
-                                   source_path => $source_path
-                        } );
-      }
+                                   ih          => ( $extra{ih}          // '' ),
+                                   source_path => ( $extra{source_path} // '' ),
+                        },
+                        return_to => $return_to, );
+      };
+
+      my $ih = lc( $c->param( 'ih' ) // '' );
+      $ih =~ s/\s+//g;
 
       my $confirm = $c->param( 'confirm' ) // '';
       my $retry   = $c->param( 'retry' )   // 0;    # hook only (unused for now)
 
-      unless ( $confirm ) {
+      unless ( $ih =~ /^[0-9a-f]{40}$/ ) {
         return
-            $c->render(
-                        template => 'qbt_add_one',
-                        error    => "confirm required",
-                        picked   => {
-                                   ih          => $ih,
-                                   source_path => $source_path,
-                        }, );
+            $fail->(
+                     "BAD INFOHASH",
+                     ih          => $ih,
+                     source_path => ( $c->param( 'source_path' ) // '' ) );
       }
 
-      unless ( $source_path ) {
+      unless ( $confirm ) {
         return
-            $c->render(
-                        template => 'qbt_add_one',
-                        error    => "missing source_path",
-                        picked   => {
-                                   ih          => $ih,
-                                   source_path => $source_path,
-                        }, );
+            $fail->(
+                     "confirm required",
+                     ih          => $ih,
+                     source_path => ( $c->param( 'source_path' ) // '' ) );
+      }
+
+      # ----------------------------
+      # source_path: param first, then cache fallback by ih
+      # ----------------------------
+      my $source_path = $c->param( 'source_path' ) // '';
+      $source_path =~ s/^\s+|\s+$//g;
+
+      # Prefer the canonical in-memory snapshot if you have it
+      my $by_ih = $c->app->defaults->{localcache}{by_ih};
+      $by_ih = {} if ref( $by_ih ) ne 'HASH';
+
+      if ( !length $source_path ) {
+        my $rec = $by_ih->{$ih};
+        if ( ref( $rec ) eq 'HASH' ) {
+          $source_path = $rec->{source_path} // '';
+          $source_path =~ s/^\s+|\s+$//g;
+        }
+      }
+
+      # If still missing, fall back to disk cache load (slower, but correct)
+      if ( !length $source_path ) {
+        my ( $local_by_ih ) =
+            QBTL::LocalCache::get_local_by_ih(
+                                       $c->app,
+                                       root_dir => ( $opts->{root_dir} || '.' ),
+                                       opts_local => {torrent_dir => "/"}, );
+        $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
+
+        my $rec = $local_by_ih->{$ih};
+        if ( ref( $rec ) eq 'HASH' ) {
+          $source_path = $rec->{source_path} // '';
+          $source_path =~ s/^\s+|\s+$//g;
+        }
+      }
+
+      $app->log->debug( prefix_dbg() . " SOURCE_PATH: $source_path\n " );
+
+      unless ( length $source_path ) {
+        return
+            $fail->(
+                     "missing source_path",
+                     ih          => $ih,
+                     source_path => $source_path );
       }
 
       # ---------- Runtime overlay for Page View culling ----------
@@ -581,15 +673,15 @@ sub app {
 
         _add_one_remove_ih( $c->app, $ih );
         my $st = _add_one_state( $c->app );
-        $app->log->debug(   prefix_dbg
-                          . " [add_one] after remove ih: "
-                          . "$ih idx: $st->{idx} queue_n: "
-                          . scalar( @{$st->{queue} || []} ) );
+        $app->log->debug( prefix_dbg()
+                   . " [add_one] after remove ih: $ih idx: $st->{idx} queue_n: "
+                   . scalar( @{$st->{queue} || []} ) );
+
         return
-            $c->render(
-                        template => 'qbt_add_one',
-                        error    => "torrent_exists check failed: $err",
-                        picked   => {ih => $ih, source_path => $source_path}, );
+            $fail->(
+                     "torrent_exists check failed: $err",
+                     ih          => $ih,
+                     source_path => $source_path );
       }
 
       if ( $exists ) {
@@ -619,16 +711,12 @@ sub app {
         $app->log->debug(   prefix_dbg()
                           . " AFTER REMOVE ih: $ih idx: $st->{idx} queue_n: "
                           . scalar( @{$st->{queue} || []} ) );
-        return
-            $c->render(
-                        template => 'qbt_add_one',
-                        error    => $msg,
-                        picked   => {ih => $ih, source_path => $source_path}, );
+
+        return $fail->( $msg, ih => $ih, source_path => $source_path );
       }
 
       my $sz = ( -e $source_path ) ? ( -s $source_path ) : 0;
 
-      $app->log->debug( prefix_dbg() . " SOURCE_PATH: $source_path\n " );
       my $rt = $c->app->defaults->{runtime} || {};
       my $mounted =
           ( $rt->{mounts} && ref( $rt->{mounts}{mounted} ) eq 'HASH' )
@@ -640,6 +728,7 @@ sub app {
         my $err =
             "Torrent volume not mounted: $v_torrent (source_path=$source_path)";
         _add_one_mark_fail( $c->app, $ih, $err );
+
         classify_triage(
                          $c->app,
                          {
@@ -650,13 +739,11 @@ sub app {
                           source_path => $source_path
                          },
                          'missing_mount' );
+
         _add_one_remove_ih( $c->app, $ih );
-        return
-            $c->render(
-                        template => 'qbt_add_one',
-                        error    => $err,
-                        picked   => {ih => $ih, source_path => $source_path} );
+        return $fail->( $err, ih => $ih, source_path => $source_path );
       }
+
       my $ih_file = eval { _infohash_from_torrent_file( $app, $source_path ) };
       $ih_file = $@ ? "(ih parse failed: $@)" : $ih_file;
 
@@ -669,12 +756,17 @@ sub app {
 
       require QBTL::SavePath;
 
-      my ( $local_by_ih ) =
-          QBTL::LocalCache::get_local_by_ih(
+      # Use the best local_by_ih we have (prefer in-memory canonical)
+      my $local_by_ih = $by_ih;
+      if ( ref( $local_by_ih ) ne 'HASH' || !%$local_by_ih ) {
+        my ( $disk_by_ih ) =
+            QBTL::LocalCache::get_local_by_ih(
                                        $app,
                                        root_dir => ( $opts->{root_dir} || '.' ),
                                        opts_local => {torrent_dir => "/"}, );
-      $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
+        $disk_by_ih  = {} if ref( $disk_by_ih ) ne 'HASH';
+        $local_by_ih = $disk_by_ih;
+      }
 
       my ( $savepath, $why, $add );
       my $pending_root_rename_data;
@@ -689,11 +781,12 @@ sub app {
                                                           $app, $ih_file,
                                                           rec   => $rec,
                                                           debug => \@sp_dbg, );
+
         unless ( $savepath ) {
 
           # minimal record for NO_HITS (stash whatever you have)
           my $nohit = {
-            ih          => $ih,    # <-- use the infohash key you’re in
+            ih          => $ih,
             name        => ( $rec->{name}        // '' ),
             bucket      => ( $rec->{bucket}      // '' ),
             tracker     => ( $rec->{tracker}     // '' ),
@@ -701,49 +794,36 @@ sub app {
             total_size  => ( $rec->{total_size}  // 0 ),
             files => ( ref( $rec->{files} ) eq 'ARRAY' ? $rec->{files} : [] ),
 
-            # “why did it fail”
             savepath_why => ( $why // '' ),
-            savepath_dbg => \@sp_dbg,         # keep it if you want
-          };
+            savepath_dbg => \@sp_dbg,};
 
           classify_no_hits( $app, $nohit, "savepath_not_found" );
-          _add_one_mark_fail( $c->app, $ih, "NO_HITS: savepath_not_found" )
-              ;                               # optional
-          _add_one_remove_ih( $c->app, $ih );
+          _add_one_mark_fail( $c->app, $ih, "NO_HITS: savepath_not_found" );
 
+          _add_one_remove_ih( $c->app, $ih );
           my $st = _add_one_state( $c->app );
           $app->log->debug( prefix_dbg()
                    . " [add_one] NO_HITS removed ih=$ih idx=$st->{idx} queue_n="
                    . scalar( @{$st->{queue} || []} ) );
 
-  # then bounce back to referrer (or torrents) instead of rendering the red page
-          return $c->redirect_to( $c->req->headers->referrer // '/torrents' );
-
-          # signal to caller that we “handled” this ih as NO_HITS
-          $add = 0;                           # if you use $add later
-          return ( 0, "no_hit" );
+          # bounce back (caller-driven)
+          return $c->redirect_to( $return_to );
         }
 
- #         die "savepath not found ($why)\n\n" . _fmt_savepath_debug( \@sp_dbg )
- #             unless $savepath;
-
-        # ---- Munge savepath + decide root rename (if hit path is known) ----
+        # ---- Extract hit_path from debug ----
         my $hit_path = '';
         for my $ln ( @sp_dbg ) {
           next unless defined $ln;
+          if ( ref( $ln ) eq 'HASH' ) {next}    # just in case
           if ( $ln =~ /\bhit=(.+)\z/ ) {
             $hit_path = $1;
             $hit_path =~ s/\s+\z//;
-            $app->log->debug(
-                 prefix_dbg() . " dbg hit_path=" . ( $hit_path || '(empty)' ) );
             last;
           }
         }
         if ( !$hit_path && defined $why && $why =~ /\bhit=(.+)\z/ ) {
           $hit_path = $1;
           $hit_path =~ s/\s+\z//;
-          $app->log->debug(
-                 prefix_dbg() . " dbg hit_path=" . ( $hit_path || '(empty)' ) );
         }
 
         $app->log->debug(
@@ -755,9 +835,11 @@ sub app {
                 . " dbg torrent_top_lvl=$torrent_top_dbg is_multi=$is_multi_dbg"
         );
 
-        if ( $hit_path ) {    # Setup for renaming the torrent root directory
+        # ---- Munge savepath + decide root rename (if hit path is known) ----
+        if ( $hit_path ) {
           my $rename_dbg;
           my $munged_save_dbg;
+
           my $disk_file_dir_dbg   = dirname( $hit_path );
           my $disk_parent_dir_dbg = dirname( $disk_file_dir_dbg );
           my $disk_root_dbg       = basename( $disk_file_dir_dbg );
@@ -784,16 +866,17 @@ sub app {
 
             $savepath                 = $munged_save_dbg if $munged_save_dbg;
             $pending_root_rename_data = $rename_dbg;
+
             if ( ref( $pending_root_rename_data ) eq 'HASH' ) {
               my $new_root = $pending_root_rename_data->{drivespace_top_lvl}
                   // '';
               if ( length $new_root ) {
                 QBTL::Store::store_put_local_override(
-                          $app, $ih,
-                          {
-                           root_override            => $new_root,
-                           pending_root_rename_data => $pending_root_rename_data
-                          } );
+                         $app, $ih,
+                         {
+                          root_override            => $new_root,
+                          pending_root_rename_data => $pending_root_rename_data,
+                         } );
               }
             }
           }
@@ -802,26 +885,13 @@ sub app {
           }
         }
 
-        if ( length $hit_path ) {
-          $app->log->debug( prefix_dbg()
-                      . " DEBUG: about to call munge_savepath_and_root_rename  "
-                      . " hit_path: $hit_path" );
-
-          ( $savepath, $pending_root_rename_data ) =
-              munge_savepath_and_root_rename(
-                                              rec      => $rec,
-                                              hit_path => $hit_path,
-                                              savepath => $savepath, );
-
-          if ( ref( $pending_root_rename_data ) eq 'HASH' ) {
-            $rec->{pending_root_rename_data} = $pending_root_rename_data;
-          }
-        }
+        # ---- payload mount check on savepath ----
         my $v_payload = QBTL::Utils::vol_from_path( $savepath );
         if ( length( $v_payload ) && !$mounted->{$v_payload} ) {
           my $err =
               "Payload volume not mounted: $v_payload (savepath=$savepath)";
           _add_one_mark_fail( $c->app, $ih, $err );
+
           classify_triage(
                            $c->app,
                            {
@@ -830,17 +900,14 @@ sub app {
                             path        => '/qbt/add_one',
                             err         => $err,
                             source_path => $source_path,
-                            savepath    => $savepath
+                            savepath    => $savepath,
                            },
                            'missing_mount' );
+
           _add_one_remove_ih( $c->app, $ih );
-          return
-              $c->render(
-                          template => 'qbt_add_one',
-                          error    => $err,
-                          picked   => {ih => $ih, source_path => $source_path}
-              );
+          die $err;
         }
+
         $app->log->debug(
                   prefix_dbg()
                 . " savepath_final: $savepath "
@@ -850,16 +917,18 @@ sub app {
                   . $pending_root_rename_data->{drivespace_top_lvl}
               : "" ) );
 
+        # ---- Add torrent to qBittorrent now ----
         $add = $qbt->api_torrents_add( $source_path, $savepath );
-        die "add returned non-ih" unless ref( $add ) eq 'HASH';
+        die "add returned non-HASH" unless ref( $add ) eq 'HASH';
 
         1;
       };
 
       unless ( $ok ) {
-        $app->log->error( "DEBUG: eval failed in add_one: $@" );
         my $err = "$@";
         chomp $err;
+
+        $app->log->error( "DEBUG: eval failed in add_one: $err" );
 
         _add_one_mark_fail( $c->app, $ih, $err );
         classify_triage(
@@ -873,6 +942,7 @@ sub app {
                           savepath    => ( $savepath || '' ),
                          },
                          'add_one_failed', );
+
         $processed->{$ih} = {
                              status      => 'failed',
                              ts          => time,
@@ -885,20 +955,16 @@ sub app {
         $app->log->debug( prefix_dbg()
                   . "  [add_one] after remove ih: $ih idx: $st->{idx} queue_n: "
                   . scalar( @{$st->{queue} || []} ) );
-        return
-            $c->render(
-                        template => 'qbt_add_one',
-                        error    => $err,
-                        picked   => {ih => $ih, source_path => $source_path}, );
+
+        return $fail->( $err, ih => $ih, source_path => $source_path );
       }
 
-      # but if we returned (0,"no_hit") from inside eval, it did NOT die.
-      # So we need to check whether $savepath was set:
+   # If savepath went missing because we early-returned redirect (NO_HITS path),
+   # we already redirected. But belt-and-suspenders:
       unless ( $savepath ) {
-        my $back = $c->req->headers->referrer
-            // '/torrents';    # or '/qbt/add_one'
-        return $c->redirect_to( $back );
+        return $c->redirect_to( $return_to );
       }
+
       my $body = $add->{body} // '';
       $app->log->debug( prefix_dbg()
         . " add_one: ok: $add->{ok} code=$add->{code} body: $body savepath: $savepath"
@@ -920,11 +986,8 @@ sub app {
         $app->log->debug( prefix_dbg()
                    . " [add_one] after remove ih: $ih idx: $st->{idx} queue_n: "
                    . scalar( @{$st->{queue} || []} ) );
-        return
-            $c->render(
-                        template => 'qbt_add_one',
-                        error    => $err,
-                        picked   => {ih => $ih, source_path => $source_path}, );
+
+        return $fail->( $err, ih => $ih, source_path => $source_path );
       }
 
       if ( $body =~ /fails/i ) {
@@ -940,19 +1003,14 @@ sub app {
 
         _add_one_remove_ih( $c->app, $ih );
         my $st = _add_one_state( $c->app );
-        $app->log->debug(
-          prefix_dbg() . "
- [add_one] after remove ih: $ih idx: $st->{idx} queue_n: "
-              . scalar( @{$st->{queue} || []} ) );
-        return
-            $c->render(
-                        template => 'qbt_add_one',
-                        error    => $err,
-                        picked   => {ih => $ih, source_path => $source_path}, );
+        $app->log->debug( prefix_dbg()
+                   . " [add_one] after remove ih: $ih idx: $st->{idx} queue_n: "
+                   . scalar( @{$st->{queue} || []} ) );
+
+        return $fail->( $err, ih => $ih, source_path => $source_path );
       }
 
-# ---------- hand off to Queue.pm (no inline post-check, no inline recheck) ----------
-      my $pending_root_rename_data;
+      # ---------- hand off to Queue.pm ----------
       my $rec = $local_by_ih->{$ih};
       if (    ref( $rec ) eq 'HASH'
            && ref( $rec->{pending_root_rename_data} ) eq 'HASH' )
@@ -967,10 +1025,11 @@ sub app {
             . ( $pending_root_rename_data->{drivespace_top_lvl} // '?' );
       }
 
-      $app->log->debug( prefix_dbg() . " rename_intent: $rr_dbg\n", );
+      $app->log->debug( prefix_dbg() . " rename_intent: $rr_dbg\n" );
 
       QBTL::Queue->enqueue_add_one(
-                          $c->app, $ih,
+                          $c->app,
+                          ih                       => $ih,
                           source_path              => $source_path,
                           savepath                 => ( $savepath || '' ),
                           pending_root_rename_data => $pending_root_rename_data,
@@ -988,22 +1047,81 @@ sub app {
 
       $app->log->debug( prefix_dbg()
                    . " [add_one] after remove ih: $ih idx: $st->{idx} queue_n: "
-                   . scalar( @{$st->{queue} || []} . "\n\n" ) );
+                   . scalar( @{$st->{queue} || []} )
+                   . "\n\n" );
+
       $c->app->defaults->{qbt_snap_ts} = 0;
-
-      my $return_to = $c->param( 'return_to' ) // '';
-
-      if (    $return_to !~ m{\A/}
-           || $return_to =~ m{://}
-           || $return_to =~ m{[\r\n]} )
-      {
-        $return_to = '/qbt/add_one';
-      }
 
       $app->log->debug(
                prefix_dbg() . " add_one queued ih: $ih return_to: $return_to" );
-      return $c->redirect_to( $return_to );
 
+      return $c->redirect_to( $return_to );
+    } );
+
+  $r->post(
+    '/api/add_one_by_ih' => sub {
+      my $c = shift;
+
+      my $ih = $c->param( 'ih' ) // '';
+      return $c->render( json => {ok => 0, err => 'bad ih'}, status => 400 )
+          unless $ih =~ /^[0-9a-f]{40}$/;
+
+      # Canonical in-memory cache (preferred)
+      my $by_ih = $c->app->defaults->{localcache}{by_ih};
+      $by_ih = {} if ref( $by_ih ) ne 'HASH';
+
+      my $rec = $by_ih->{$ih};
+
+      # Fallback: load from disk cache if not in memory
+      if ( ref( $rec ) ne 'HASH' ) {
+        my ( $local_by_ih ) =
+            QBTL::LocalCache::get_local_by_ih(
+                           $c->app,
+                           root_dir => ( $c->app->defaults->{root_dir} || '.' ),
+                           opts_local => {torrent_dir => "/"}, );
+        $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
+        $rec         = $local_by_ih->{$ih};
+      }
+
+      return
+          $c->render(
+        json => {ok => 0, err => "No cache record for ih=$ih (rebuild cache?)"},
+        status => 404,
+          ) unless ref( $rec ) eq 'HASH';
+
+      my $source_path = $rec->{source_path} // '';
+      return
+          $c->render(
+          json   => {ok => 0, err => "missing source_path in cache for ih=$ih"},
+          status => 422,
+          ) unless length $source_path;
+
+      my $ok = eval {
+        require QBTL::Queue;
+
+# enqueue_add_one signature varies; use the one you already have.
+# Common patterns:
+#   QBTL::Queue->enqueue_add_one($c->app, ih => $ih, source_path => $source_path);
+# or QBTL::Queue::enqueue_add_one($c->app, $ih, source_path => $source_path);
+        QBTL::Queue->enqueue_add_one( $c->app, $ih,
+                                      source_path => $source_path );
+        1;
+      };
+
+      if ( !$ok ) {
+        my $e = "$@";
+        chomp $e;
+        return $c->render( json => {ok => 0, err => $e}, status => 500 );
+      }
+
+      return
+          $c->render(
+                      json => {
+                               ok          => 1,
+                               ih          => $ih,
+                               source_path => $source_path,
+                               msg         => 'enqueued',
+                      } );
     } );
 
   $r->get(
@@ -1118,12 +1236,21 @@ sub app {
         return 'INTERNAL';
       };
 
+      # tier2: what you want to “subclass” under each tier1
+      my $tier2_of = sub {
+        my ( $r ) = @_;
+        my $k = $r->{why} // '';
+        $k =~ s/^\s+|\s+$//g;
+        $k = '(none)' if $k eq '';
+        return $k;
+      };
+
       my %bucket;
       for my $r ( @rows ) {
         push @{$bucket{$bucket_of->( $r )}}, $r;
       }
 
-      # priority order requested: 5 1 3 4 2
+      # priority order
       my @order = qw(
           INTERNAL
           NO_HITS
@@ -1136,20 +1263,31 @@ sub app {
       for my $k ( @order ) {
         my $list = $bucket{$k} || [];
         next unless @$list;
+
+        # group into tier2 buckets
+        my %g;
+        for my $r ( @$list ) {
+          push @{$g{$tier2_of->( $r )}}, $r;
+        }
+
+        # optional: sort tier2 groups by count desc, then name
+        my @groups = map {
+          +{
+            key   => $_,
+            count => scalar @{$g{$_}},
+            rows  => $g{$_},             # keep if you want drill-down later
+          }
+        } sort { scalar( @{$g{$b}} ) <=> scalar( @{$g{$a}} ) || $a cmp $b }
+            keys %g;
+
         push @sections,
-            {
-             key   => $k,
-             count => scalar( @$list ),
-             rows  => $list,};
+            +{
+              key    => $k,
+              count  => scalar( @$list ),
+              groups => \@groups,};
       }
 
-      $c->stash(
-        sections => \@sections,
-
-        # optional: if you ever want a tiny nav/jump list later
-        # counts   => { map { $_ => scalar(@{ $bucket{$_} || [] }) } @order },
-      );
-
+      $c->stash( sections => \@sections );
       return $c->render( template => 'qbt_no_payload' );
     } );
 
@@ -1407,6 +1545,110 @@ sub app {
       $c->stash( found => scalar( @rows ),
                  rows  => \@rows, );
       return $c->render( template => 'qbt_triage' );
+    } );
+
+  $r->get(
+    '/qbt/view' => sub {
+      my $c = shift;
+
+      my $ih        = lc( $c->param( 'ih' ) // '' );
+      my $return_to = $c->param( 'return_to' ) // '/torrents';
+
+      # sanitize return_to
+      $return_to = '/torrents'
+          if $return_to !~ m{\A/}
+          || $return_to =~ m{://}
+          || $return_to =~ m{[\r\n]};
+
+      unless ( $ih =~ /^[0-9a-f]{40}$/ ) {
+        $c->flash( notice => "Bad ih" );
+        return $c->redirect_to( $return_to );
+      }
+
+      # Prefer in-memory canonical store
+      my $by_ih = $c->app->defaults->{localcache}{by_ih};
+      $by_ih = {} if ref( $by_ih ) ne 'HASH';
+
+      my $rec = $by_ih->{$ih};
+
+      # Fallback: load cache if store not yet populated
+      if ( ref( $rec ) ne 'HASH' ) {
+        my ( $local_by_ih ) =
+            QBTL::LocalCache::get_local_by_ih(
+                           $c->app,
+                           root_dir => ( $c->app->defaults->{root_dir} || '.' ),
+                           opts_local => {torrent_dir => "/"}, );
+        $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
+        $rec         = $local_by_ih->{$ih};
+      }
+
+      unless ( ref( $rec ) eq 'HASH' ) {
+        $c->flash( notice => "No cache record for ih=$ih (rebuild cache?)" );
+        return $c->redirect_to( $return_to );
+      }
+
+      $c->stash(
+                 ih        => $ih,
+                 rec       => $rec,
+                 return_to => $return_to, );
+
+      return $c->render( template => 'qbt_view_meta' );
+    } );
+
+  $r->get(
+    '/api/view_meta' => sub {
+      my $c  = shift;
+      my $ih = lc( $c->param( 'ih' ) // '' );
+
+      return $c->render( json => {ok => 0, err => 'bad ih'}, status => 400 )
+          unless $ih =~ /^[0-9a-f]{40}$/;
+
+      my $by_ih = $c->app->defaults->{localcache}{by_ih};
+      $by_ih = {} if ref( $by_ih ) ne 'HASH';
+      my $rec = $by_ih->{$ih};
+
+      if ( ref( $rec ) ne 'HASH' ) {
+        my ( $local_by_ih ) =
+            QBTL::LocalCache::get_local_by_ih(
+                           $c->app,
+                           root_dir => ( $c->app->defaults->{root_dir} || '.' ),
+                           opts_local => {torrent_dir => "/"}, );
+        $local_by_ih = {} if ref( $local_by_ih ) ne 'HASH';
+        $rec         = $local_by_ih->{$ih};
+      }
+
+      return $c->render( json => {ok => 0, err => 'not found'}, status => 404 )
+          unless ref( $rec ) eq 'HASH';
+
+      my $name = $rec->{name} // '';
+      $name =~ s/^\s+|\s+$//g;
+
+      if ( !$name ) {
+        my $sp = $rec->{source_path} // '';
+        if ( length $sp ) {
+          ( $name ) = $sp =~ m{([^/]+)\z};
+          $name ||= '';
+          $name =~ s/\.torrent\z//i;
+        }
+      }
+
+      my $files = $rec->{files};
+      $files = [] if ref( $files ) ne 'ARRAY';
+      my @paths = map {
+        ( ref( $_ ) eq 'HASH' && defined $_->{path} )
+            ? $_->{path}
+            : ()
+      } @$files;
+
+      return
+          $c->render(
+                      json => {
+                               ok          => 1,
+                               ih          => $ih,
+                               name        => $name,
+                               source_path => ( $rec->{source_path} // '' ),
+                               files       => \@paths,
+                      } );
     } );
 
   # ---------- Idle observer tick ----------
