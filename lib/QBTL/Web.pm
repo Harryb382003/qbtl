@@ -1307,7 +1307,9 @@ sub app {
      $page = 1 if $page < 1;
 
      my $q = $c->param( 'q' ) // '';
-     $q =~ s/^\s+|\s+$//g;
+     $q =~ s/\s+//g if $q =~ /[0-9a-f]{20}/i;    # only compact when hash-ish
+
+     my $has_q = length( $q ) ? 1 : 0;
 
      # show=missing (default) | all
      my $show = $c->param( 'show' ) // 'missing';
@@ -1366,8 +1368,15 @@ sub app {
 
      my $ignore_all = $c->session( 'ignore_unmounted' ) ? 1 : 0;
      for my $ih ( keys %$local_by_ih ) {
+
+#        $c->app->log->debug(   prefix_dbg()
+#                             . "IH_KEY='$ih' has_q=$has_q show=$show processed="
+#                             . ( exists $processed->{$ih} ? 1 : 0 )
+#                             . " no_payload="
+#                             . ( exists $no_payload->{$ih} ? 1 : 0 ) );
+
        next unless defined $ih && $ih =~ /^[0-9a-f]{40}$/;
-       next if exists $processed->{$ih};
+       next if ( !$has_q && exists $processed->{$ih} );
        next if exists $no_payload->{$ih};
 
        my $rec = $local_by_ih->{$ih};
@@ -1377,7 +1386,7 @@ sub app {
 
        my $exists_in_qbt = exists $qbt_by_ih->{$ih} ? 1 : 0;
        $in_qbt++ if $exists_in_qbt;
-       next      if ( $show eq 'missing' ) && $exists_in_qbt;
+       next      if ( !$has_q && ( $show eq 'missing' ) && $exists_in_qbt );
 
        my $source_path = $rec->{source_path} // '';
        if ( $ignore_all && length $source_path ) {
